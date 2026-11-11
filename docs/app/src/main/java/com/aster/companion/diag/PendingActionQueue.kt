@@ -77,4 +77,24 @@ object PendingActionQueue {
             byKey.clear()
         }
     }
+    /**
+     * **重放循环**：按 FIFO 依次把动作交给 [handler]。
+     *
+     * 约定：
+     * - handler 返回 true → 该动作**已完成**，出队；
+     * - 返回 false → **保留**在队列里（下次再试），并且**停止本轮**（避免在离线时反复打同一个失败的请求）。
+     *
+     * 返回本轮成功出队的条数。整个过程串行，保证同一时刻只有一个重放在飞。
+     */
+    suspend fun drain(handler: suspend (Action) -> Boolean): Int {
+        var done = 0
+        while (true) {
+            val next = peek() ?: break
+            val ok = runCatching { handler(next) }.getOrDefault(false)
+            if (!ok) break
+            remove(next.key)
+            done++
+        }
+        return done
+    }
 }
