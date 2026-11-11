@@ -26,3 +26,23 @@
 - **问题**：`MainActivity.kt` 4704 行，改一处要滚很久。
 - **选择**：把自包含的 Composable 逐个搬到 `ui/settings/`，共享声明改 `internal`。
 - **代价**：文件变多；需要遵守"新页面就新建文件"的约定。
+## D6 A2 拆分路线（实测依赖）
+
+用"扫方法体标识符"的方式量出真实依赖（**不要凭签名猜**，吃过亏）：
+
+| 方法 | 真实依赖 | 能否单独搬 |
+|---|---|---|
+| `decideShot` | `inputsFor` + `character` + `conversationProfile` + `cipher` + `dao` | ✗ 必须连 `inputsFor` 一起 |
+| `inputsFor` | `dao` + `character` + `conversationProfile` + `cipher` | 可（和 decideShot 同簇） |
+| `buildTagPrompt` | `dao` + `transport` + `renderPromptBuilder` + `imageRuleResolver` + `cipher` + `transcribeAppearance` | ✗ 依赖最多 |
+| `buildTagPromptForThread` | 同上（转调 buildTagPrompt） | 随 buildTagPrompt |
+| `transcribeAppearance` | `transport` + `imageRuleResolver` | 可（较干净） |
+| `validateEditedPrompt` | 无（纯函数） | ✓ 最容易 |
+
+**结论**：`ScenePromptCoordinator` 的拆分应该按"簇"来，而不是按方法：
+
+1. **簇 A（决策）**：`decideShot` + `inputsFor` + 相关私有字段 → `SceneDecider`（依赖 `dao` + `cipher`）
+2. **簇 B（组装）**：`buildTagPrompt*` + `transcribeAppearance` → `SceneComposer`（依赖 `dao` + `transport` + `renderPromptBuilder` + `imageRuleResolver`）
+3. **纯函数**：`validateEditedPrompt` → 独立 `ScenePromptValidation`
+
+每搬一簇就编译 + 全量测试 + 推送（CI 会再验一遍）。
