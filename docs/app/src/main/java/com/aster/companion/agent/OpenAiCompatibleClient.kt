@@ -61,14 +61,15 @@ class OpenAiCompatibleClient @Inject constructor(
     private val http: OkHttpClient,
     @ApplicationContext private val context: Context,
     /** 按「自动 / 内网 / 外网」解析 profile 的 baseUrl（见 EndpointResolver）。 */
-    private val dao: com.aster.companion.data.CompanionDao
+    private val dao: com.aster.companion.data.CompanionDao,
+    private val endpointRegistry: com.aster.companion.net.EndpointRegistry,
 ) {
     /**
      * 这次该用哪个地址：自动模式下在家走内网、出门走外网。
      * 解析失败一律退回原 profile —— 绝不因为解析把出图/对话弄挂。
      */
     private suspend fun resolved(profile: ModelProfileEntity): ModelProfileEntity =
-        runCatching { com.aster.companion.net.EndpointResolver.resolve(dao, profile) }
+        runCatching { endpointRegistry.resolve(dao, profile) }
             .getOrDefault(profile)
 
     /** Avoid paying for a failed stream attempt on every group participant for non-SSE providers. */
@@ -221,7 +222,7 @@ class OpenAiCompatibleClient @Inject constructor(
         capabilities: Set<Capability>,
         history: List<ConversationRequestPolicy.Message> = emptyList()
     ): Flow<ToolChatStreamEvent> = flow {
-        val streamProfileKey = "${com.aster.companion.net.EndpointResolver.cachedBaseUrl(profile.id, profile.baseUrl).trimEnd('/')}/${profile.modelName}"
+        val streamProfileKey = "${endpointRegistry.cachedBaseUrl(profile.id, profile.baseUrl).trimEnd('/')}/${profile.modelName}"
         check(streamProfileKey !in unsupportedToolStreamingProfiles) {
             "Provider does not support tool-call streaming"
         }
@@ -358,7 +359,7 @@ class OpenAiCompatibleClient @Inject constructor(
     ): Result<GeneratedImage> {
         // key 里**不含模型名**：图像 API 池轮换供应商时模型名会变，含进去就换了 key、闸门失效。
         val key = listOf(
-            com.aster.companion.net.EndpointResolver.cachedBaseUrl(profile.id, profile.baseUrl).trim(),
+            endpointRegistry.cachedBaseUrl(profile.id, profile.baseUrl).trim(),
             ImageGenerationRequestPolicy.normalizeSize(size),
             prompt.trim()
         ).joinToString("|")
@@ -733,7 +734,7 @@ class OpenAiCompatibleClient @Inject constructor(
     }
 
     private fun endpoint(profile: ModelProfileEntity, path: String): String {
-        val root = com.aster.companion.net.EndpointResolver.cachedBaseUrl(profile.id, profile.baseUrl).trim().trimEnd('/')
+        val root = endpointRegistry.cachedBaseUrl(profile.id, profile.baseUrl).trim().trimEnd('/')
         val versionedRoot = if (root.endsWith("/v1", ignoreCase = true)) root else "$root/v1"
         return versionedRoot + path
     }

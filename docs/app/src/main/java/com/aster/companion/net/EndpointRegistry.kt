@@ -13,7 +13,7 @@ import kotlinx.coroutines.withContext
 
 @javax.inject.Singleton
 class EndpointRegistry @Inject constructor(
-    private val cache: EndpointCache = EndpointCache(),
+    private val cache: EndpointCache,
 ) {
 
 

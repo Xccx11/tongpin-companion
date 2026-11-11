@@ -43,7 +43,7 @@ import kotlinx.coroutines.withContext
  */
 object EndpointResolver {
 
-    private val registry = EndpointRegistry()
+    private val registry = EndpointRegistry(cache = EndpointCache())
 
     suspend fun mode(dao: CompanionDao): NetworkMode = registry.mode(dao)
     suspend fun lanOverride(dao: CompanionDao, profileId: String): String? = registry.lanOverride(dao, profileId)
