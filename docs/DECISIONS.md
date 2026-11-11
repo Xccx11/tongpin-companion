@@ -81,3 +81,11 @@
 **修法（两处）**：
 1. `EndpointRegistry` 去掉默认值：`private val cache: EndpointCache`；
 2. `EndpointCache` 加 `@Inject constructor()`（它有无参构造，但要显式标注才能被注入）。
+### D6 补充：簇 A 的最后一处阻塞 —— 外部调用者
+
+把 `decideShot` + `recentBrief` 搬进 `SceneDecider` 后，`SceneDecider` 本身能编译（修完
+`LiteProductConfig` import、`WHITESPACE` 复制、`inputsReader` 内建之后），
+但 **`ConversationTurnCoordinator.kt:853`** 仍在调 `scenePromptCoordinator.decideShot(...)`。
+
+**解法**：在 `ScenePromptCoordinator` 上保留一个**委托方法**（签名不变，方法体一行转给 `decider`），
+这样外部调用点不用改；等调用点都迁完后连委托一起删。
