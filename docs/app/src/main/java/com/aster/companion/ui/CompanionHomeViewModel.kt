@@ -672,43 +672,6 @@ class CompanionHomeViewModel @Inject constructor(
      * **是一次模型调用，必须走后台闸**：不然会跟聊天抢本机那几张并发槽。
      */
     // ------------------------------------------------------------ 内网 / 外网 双配置
-    // 存储走 EndpointResolver（复用 world_states 的 NETWORK scope，零迁移）。
-    private val _networkMode = kotlinx.coroutines.flow.MutableStateFlow(com.aster.companion.net.NetworkMode.AUTO)
-    val networkMode: kotlinx.coroutines.flow.StateFlow<com.aster.companion.net.NetworkMode> = _networkMode
-
-    private val _networkStatus = kotlinx.coroutines.flow.MutableStateFlow("")
-    val networkStatus: kotlinx.coroutines.flow.StateFlow<String> = _networkStatus
-
-    private val _lanBaseUrl = kotlinx.coroutines.flow.MutableStateFlow("")
-    val lanBaseUrl: kotlinx.coroutines.flow.StateFlow<String> = _lanBaseUrl
-
-    /** 刷新"当前模式 + 实际生效地址"，给设置页与主界面胶囊用。 */
-    fun refreshNetworkStatus() = viewModelScope.launch(crashGuard) {
-        runCatching {
-            _networkMode.value = com.aster.companion.net.EndpointResolver.mode(dao)
-            _networkStatus.value = com.aster.companion.net.EndpointResolver.describe(dao)
-        }
-    }
-
-    /** 三态开关：自动 / 内网 / 外网。 */
-    fun setNetworkMode(mode: com.aster.companion.net.NetworkMode) = viewModelScope.launch(crashGuard) {
-        runCatching { com.aster.companion.net.EndpointResolver.setMode(dao, mode) }
-        refreshNetworkStatus()
-    }
-
-    /** 读某个 profile 的内网地址（设置页打开时填进输入框）。 */
-    fun loadLanBaseUrl(profileId: String) = viewModelScope.launch(crashGuard) {
-        runCatching {
-            _lanBaseUrl.value = com.aster.companion.net.EndpointResolver.lanOverride(dao, profileId).orEmpty()
-        }
-    }
-
-    /** 存某个 profile 的内网地址；传空 = 删掉（该 profile 永远走外网）。 */
-    fun setLanBaseUrl(profileId: String, url: String) = viewModelScope.launch(crashGuard) {
-        runCatching { com.aster.companion.net.EndpointResolver.setLanOverride(dao, profileId, url) }
-        _lanBaseUrl.value = url.trim()
-        refreshNetworkStatus()
-    }
     fun syncLivingState(characterId: String) = viewModelScope.launch(crashGuard) {
         val synced = com.aster.companion.lite.LiteBackgroundLlmGate.withPermit {
             lifeTicker.syncNow(characterId)
