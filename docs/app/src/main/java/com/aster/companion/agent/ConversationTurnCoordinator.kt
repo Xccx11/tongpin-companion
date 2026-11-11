@@ -897,7 +897,12 @@ class ConversationTurnCoordinator @Inject constructor(
                         )
                     )
                 }.onFailure { error ->
-                    Log.w("TongpinLitePhoto", "Lite photo scene failed after chat", error)
+                    Log.w("TongpinLitePhoto", "Lite photo scene failed after chat", error)                    // B2 离线优先：场景失败时入队，等前台恢复后重放（同 key 幂等，不会重复生成）。
+                    com.aster.companion.diag.PendingActionQueue.enqueue(
+                        key = "scene:" + threadId + ":" + sceneIntent.take(24),
+                        kind = "scene_photo",
+                        payload = sceneIntent,
+                    )
                     liteScenePhotoBus.publish(
                         com.aster.companion.lite.ScenePhotoRequest(
                             threadId = threadId,
