@@ -1,0 +1,12 @@
+# 让 GitHub 把本项目识别为 Kotlin 项目（源码在 docs/app 里，原先被误判成 Python）
+*.kt linguist-language=Kotlin
+*.kts linguist-language=Kotlin
+*.java linguist-language=Java
+*.py linguist-detectable=false
+docs/** linguist-vendored=false
+
+# 行尾：脚本必须 LF，Windows 启动脚本 CRLF
+gradlew text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
