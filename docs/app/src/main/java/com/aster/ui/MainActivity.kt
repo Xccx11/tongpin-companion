@@ -460,124 +460,6 @@ internal fun ConversationManagementConfirmation(
 }
 
 
-@Composable
-internal fun MomentCard(
-    post: MomentPostEntity,
-    character: com.aster.companion.data.CharacterEntity?,
-    characters: Map<String, com.aster.companion.data.CharacterEntity>,
-    media: List<MomentMediaEntity>,
-    comments: List<MomentCommentEntity>,
-    reactions: List<MomentReactionEntity>,
-    onImageClick: (String) -> Unit,
-    onToggleLike: (Boolean) -> Unit,
-    onComment: () -> Unit,
-    onReply: (com.aster.companion.data.MomentCommentEntity) -> Unit,
-    onEdit: (() -> Unit)? = null,
-    onDelete: () -> Unit,
-    onComposeImage: (() -> Unit)? = null
-) {
-    val colors = AsterTheme.colors
-    val isUser = post.authorType == MomentActors.USER
-    val liked = reactions.any { it.actorType == MomentActors.USER && it.actorId == MomentActors.USER_ID && it.kind == MomentActors.LIKE }
-    val name = if (isUser) "我" else character?.name ?: "角色"
-    Column(Modifier.fillMaxWidth().asterCard(colors).padding(AsterMetrics.cardPadding)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(44.dp).clip(CircleShape).background(colors.accentWash), contentAlignment = Alignment.Center) {
-                if (!isUser && !character?.avatarUri.isNullOrBlank()) AsyncImage(model = character?.avatarUri, contentDescription = "${name}头像", modifier = Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
-                else Text(name.take(1), color = colors.primary, fontWeight = FontWeight.Bold)
-            }
-            Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                Text(name, color = colors.text, fontSize = AsterType.title, fontWeight = FontWeight.SemiBold)
-                Text(momentTime(post.createdAt), color = colors.textSubtle, fontSize = AsterType.caption, modifier = Modifier.padding(top = 2.dp))
-            }
-            if (onEdit != null) {
-                IconButton(onClick = onEdit) { Icon(Icons.Outlined.Edit, contentDescription = "编辑动态", tint = colors.textSubtle, modifier = Modifier.size(19.dp)) }
-            }
-            IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, contentDescription = "删除动态", tint = colors.textSubtle, modifier = Modifier.size(19.dp)) }
-        }
-        if (post.body.isNotBlank()) Text(post.body, color = colors.text, fontSize = AsterType.title, lineHeight = 23.sp, modifier = Modifier.padding(top = 12.dp))
-        if (post.status == MomentActors.STATUS_GENERATING) Text("正在生成配图…", color = colors.primary, fontSize = AsterType.label, modifier = Modifier.padding(top = 10.dp))
-        if (post.status == MomentActors.STATUS_FAILED) Text("配图生成失败，文字动态已保留", color = colors.textMuted, fontSize = AsterType.label, modifier = Modifier.padding(top = 10.dp))
-        if (media.isNotEmpty()) {
-            Column(Modifier.fillMaxWidth().padding(top = 11.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                media.sortedBy { it.ordinal }.chunked(if (media.size == 1) 1 else 3).forEach { rowImages ->
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        rowImages.forEach { item ->
-                            AsyncImage(
-                                model = item.imageUri,
-                                contentDescription = "动态图片",
-                                modifier = Modifier.weight(1f).then(if (media.size == 1) Modifier.height(250.dp) else Modifier.aspectRatio(1f)).clip(RoundedCornerShape(AsterMetrics.controlRadius)).clickable { onImageClick(item.imageUri) },
-                                contentScale = ContentScale.Crop
-                            )
-                        }
-                        repeat((if (media.size == 1) 0 else 3) - rowImages.size) { Spacer(Modifier.weight(1f)) }
-                    }
-                }
-            }
-        }
-        Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("${reactions.size} 个赞", color = colors.textMuted, fontSize = AsterType.caption)
-            Spacer(Modifier.weight(1f))
-            Text("${comments.size} 条评论", color = colors.textMuted, fontSize = AsterType.caption)
-        }
-        Row(Modifier.fillMaxWidth().padding(top = 5.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            TextButton(onClick = { onToggleLike(liked) }, modifier = Modifier.weight(1f)) {
-                Icon(if (liked) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder, contentDescription = null, tint = if (liked) colors.primary else colors.textMuted, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(5.dp))
-                Text(if (liked) "已赞" else "赞", color = if (liked) colors.primary else colors.textMuted)
-            }
-            TextButton(onClick = onComment, modifier = Modifier.weight(1f)) {
-                Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = null, tint = colors.textMuted, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(5.dp))
-                Text("评论", color = colors.textMuted)
-            }
-            if (onComposeImage != null) {
-                TextButton(onClick = onComposeImage, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = colors.textMuted, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("配图", color = colors.textMuted)
-                }
-            }
-        }
-        var showAllComments by remember(post.id) { mutableStateOf(false) }
-        val visibleComments = if (showAllComments) comments else comments.takeLast(4)
-        visibleComments.forEach { comment ->
-            val commentName = MomentCommentPresentation.authorLine(comment, comments) { characterId ->
-                characters[characterId]?.name
-                    ?: character?.takeIf { it.id == characterId }?.name
-                    ?: "角色"
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
-                Text(buildAnnotatedString {
-                    withStyle(SpanStyle(color = colors.primary, fontWeight = FontWeight.SemiBold)) { append(commentName); append("：") }
-                    withStyle(SpanStyle(color = colors.text)) { append(comment.body) }
-                }, fontSize = AsterType.label, lineHeight = 19.sp, modifier = Modifier.weight(1f))
-                Box(
-                    modifier = Modifier
-                        .padding(start = 4.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { onReply(comment) }
-                        .defaultMinSize(minWidth = 44.dp, minHeight = 32.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("回复", color = colors.textSubtle, fontSize = AsterType.caption)
-                }
-            }
-        }
-        if (comments.size > 4) {
-            Text(
-                if (showAllComments) "收起评论" else "查看全部 ${comments.size} 条评论",
-                color = colors.primary,
-                fontSize = AsterType.caption,
-                modifier = Modifier
-                    .padding(top = 6.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable { showAllComments = !showAllComments }
-                    .padding(horizontal = 6.dp, vertical = 6.dp)
-            )
-        }
-    }
-}
 
 @Composable
 internal fun MomentEditorDialog(
@@ -641,7 +523,7 @@ internal fun MomentEditorDialog(
     )
 }
 
-private fun momentTime(timestamp: Long): String = SimpleDateFormat("MM月dd日 HH:mm", Locale.CHINA).format(Date(timestamp))
+internal fun momentTime(timestamp: Long): String = SimpleDateFormat("MM月dd日 HH:mm", Locale.CHINA).format(Date(timestamp))
 
 
 @Composable
