@@ -60,3 +60,15 @@
 
 **结论**：`decideShot` 不能单独搬，得连同 `recentBrief`（+ `dao` 注入）作为一个**簇**搬进 `SceneDecider`。
 搬迁时的新类需要：`dao` `transport` `cipher` `imageRuleResolver`（给 inputsReader）+ 内建 `SceneInputsReader`/`SceneSituationReader` 实例。
+### D6 补充：`EndpointResolver` 类化必须同时处理的 3 件事（实测）
+
+把 `object` 直接改成 `class` 会踩三个编译错误：
+
+1. **`NetworkMode` 枚举重复声明** —— 枚举在 object 之前的"头部"里，两处都带就会 `Redeclaration`。
+   → 把 `NetworkMode` 抽到独立文件 `NetworkMode.kt`（同包，引用不用改）。
+2. **`const val` 不能进 class** —— 原 object 里有一批 `private const val`（`MODE_ID` / `LAN_PREFIX` / `PROBE_*`）。
+   → 搬进 `private companion object { ... }`。
+3. **`internal` 类型暴露** —— 构造参数 `EndpointCache` 是 `internal`，而 Hilt 注入要求 public 构造。
+   → 把 `EndpointCache` 改成 `public`（它本身无副作用，暴露无害）。
+
+这三点解决后，`object EndpointResolver` 才能安全降级成薄委托。
