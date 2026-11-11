@@ -273,23 +273,6 @@ class ScenePromptCoordinator @Inject constructor(
                 continue
             }
             val split = PhotoReplyLines.split(raw, format)
-            // 占位符两种模型都读不了；中文只留给 z-image 系（NATURAL_LANGUAGE），其余形态剥掉。
-            val cleaned = ComfyTagPromptPolicy.sanitizeScene(
-                prompt = ComfyTagPromptPolicy.stripFences(split.tags),
-                stripCjk = stripCjk,
-                keepLineBreaks = keepLineBreaks
-            )
-            // 硬过滤拍摄器材：照片是「她眼睛看到的画面」，出现手机/相机会把构图切开。
-            // 注意：**不要在这一轮补景别**——这里产出的还是中文草稿，补进去的景别句会与中文
-            // 混排、污染草稿（实测紧接着 pass2 就把「28-year-old」「close-up」这些错误写进最终
-            // 提示词）。景别由 pass2 的规则负责，代码兜底放在最终提示词那一步。
-            // 器材清洗之后再做一遍**确定性体检**：抹禁令词（光线/阴影/blush）、
-            // 解"该行为词 vs 遮挡衣物"的冲突、把含糊的器官说法换成具体词、归一景别。
-            // 这一步不调模型、纯规则，命中什么都记在 notes 里便于核对。
-            val scrubbed = SceneExposureScrubPolicy.scrub(SceneDeviceSuppression.strip(cleaned, format), format)
-            if (scrubbed.notes.isNotEmpty()) {
-                android.util.Log.i("TongpinSceneRule", "提示词体检：${scrubbed.notes.joinToString("；")}")
-            }
             // **用户要求：返回什么就给什么。**
             // 清洗是为了好看，不是关卡。一旦它把模型给的东西整段删空——最典型的就是
             // "模型回中文、而当前格式只收英文 tag"，`stripCjk` 会把整段抹掉——就退回
