@@ -698,6 +698,17 @@ internal fun CharacterStatusCapsule(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
             ) {
                 Text("立即同步她的状态", color = colors.primary)
+            // B1 可观测性：点一下把最近的请求统计算出来（平均/P95/最慢）。
+            var traceText by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+            androidx.compose.material3.TextButton(
+                onClick = { traceText = com.aster.companion.diag.RequestTrace.report() }
+            ) {
+                Text(
+                    if (traceText.isBlank()) "查看请求统计" else traceText,
+                    color = colors.textMuted,
+                    fontSize = AsterType.micro,
+                )
+            }
 
             }
         }
