@@ -46,3 +46,10 @@
 3. **纯函数**：`validateEditedPrompt` → 独立 `ScenePromptValidation`
 
 每搬一簇就编译 + 全量测试 + 推送（CI 会再验一遍）。
+### D6 补充：`inputsFor` 的搬迁阻塞点（实测）
+
+`inputsFor` 只依赖 `dao` + `imageRuleResolver`（都可注入 ✓），但它的**返回类型 `ScenePromptInputs` 是
+`ScenePromptCoordinator` 的嵌套类型** ✗ —— 直接搬到新类会报 `Unresolved reference 'ScenePromptInputs'`。
+
+**解法（下一轮）**：搬迁时把新类里的类型引用写成 `ScenePromptCoordinator.ScenePromptInputs`，
+或先把该 data class 提升为顶层类型（更干净，但会牵动调用点）。
