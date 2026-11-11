@@ -118,7 +118,7 @@ object EndpointResolver {
      */
     suspend fun resolve(dao: CompanionDao, profile: ModelProfileEntity): ModelProfileEntity {
         val url = baseUrl(dao, profile)
-        snapshot = snapshot + (profile.id to url)      // 顺手刷新快照，给非 suspend 的拼装用
+        snapshot.updateAndGet { it + (profile.id to url) }   // 原子刷新快照，给非 suspend 的拼装用
         return if (url == profile.baseUrl) profile else profile.copy(baseUrl = url)
     }
 
@@ -130,7 +130,9 @@ object EndpointResolver {
      * （拉规则、图片提示词模型…），所以这里基本总是新鲜的；
      * 拿不到就回退 profile 自己的 baseUrl —— 行为和不接解析器时完全一样。
      */
-    @Volatile private var snapshot: Map<String, String> = emptyMap()
+    // A5：快照从 @Volatile var 改成 AtomicReference —— 原来的 `snapshot = snapshot + (...)` 是
+    // "读-改-写"，并发下会丢更新；updateAndGet 是原子的。
+    private val snapshot = java.util.concurrent.atomic.AtomicReference<Map<String, String>>(emptyMap())
 
     /**
      * 清空所有进程级缓存（探测结果 + baseUrl 快照）。
@@ -143,11 +145,11 @@ object EndpointResolver {
         probeUrl = null
         probeOk = false
         probeAt = 0L
-        snapshot = emptyMap()
+        snapshot.set(emptyMap())
     }
 
     fun cachedBaseUrl(profileId: String, fallback: String): String =
-        snapshot[profileId]?.takeIf { it.isNotBlank() } ?: fallback
+        snapshot.get()[profileId]?.takeIf { it.isNotBlank() } ?: fallback
 
     /** 给界面显示用：当前实际生效的是内网还是外网。 */
     suspend fun describe(dao: CompanionDao): String {
