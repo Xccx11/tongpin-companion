@@ -384,16 +384,24 @@ class ScenePromptCoordinator @Inject constructor(
         user: String,
         useBackgroundGate: Boolean
     ): String? {
+        // B1 可观测性：把每一跳的耗时/成败记进 RequestTrace（可在调试页用 report() 看）。
+        val startedAt = System.currentTimeMillis()
         val block = suspend {
             withTimeoutOrNull(SCENE_CHAT_TIMEOUT_MS) {
                 client.chat(profile, apiKey, system, user).getOrNull()
             }
         }
-        return if (useBackgroundGate) {
+        val result = if (useBackgroundGate) {
             com.aster.companion.lite.LiteBackgroundLlmGate.withPermit(block)
         } else {
             block()
         }
+        com.aster.companion.diag.RequestTrace.record(
+            path = "scene:" + profile.modelName,
+            durationMs = System.currentTimeMillis() - startedAt,
+            ok = result != null,
+        )
+        return result
     }
 
     /**
