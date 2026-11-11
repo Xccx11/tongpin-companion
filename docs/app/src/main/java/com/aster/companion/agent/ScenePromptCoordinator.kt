@@ -26,6 +26,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 class ScenePromptCoordinator @Inject constructor(
     private val dao: CompanionDao,
     private val client: OpenAiCompatibleClient,
+    private val transport: SceneTransport,
     private val cipher: CompanionSecretCipher,
     private val imageRuleResolver: ImageGenerationRuleResolver,
     private val renderPromptBuilder: CharacterRenderPromptBuilder
@@ -121,7 +122,7 @@ class ScenePromptCoordinator @Inject constructor(
             recent = recentBrief(threadId),
             herOwnWords = herOwnWords
         )
-        val raw = chatOnce(
+        val raw = transport.chatOnce(
             profile = profile,
             apiKey = apiKey,
             system = CharacterPhotoShotPolicy.system(input),
@@ -249,7 +250,7 @@ class ScenePromptCoordinator @Inject constructor(
         var lastNullAttempt: String? = null
         for (attempt in 1..LiteProductConfig.SCENE_MAX_ATTEMPTS) {
             val startedAt = System.currentTimeMillis()
-            val raw = chatOnce(profile, apiKey, system, user, useBackgroundGate)
+            val raw = transport.chatOnce(profile, apiKey, system, user, useBackgroundGate)
             if (raw == null) {
                 // ⚠️ 这里以前写的是 `?: error("Scene model timeout or empty reply")` ——
                 // **第 1 次拿不到就整个抛出，`SCENE_MAX_ATTEMPTS` 这个重试循环等于白写**
@@ -348,7 +349,7 @@ class ScenePromptCoordinator @Inject constructor(
         if (anchor.isEmpty()) return anchor
         val rule = runCatching { imageRuleResolver.resolveAppearanceTranscribeRule() }
             .getOrElse { renderPromptBuilder.identityFor(anchor) }
-        val reply = chatOnce(
+        val reply = transport.chatOnce(
             profile,
             apiKey,
             rule,
@@ -377,32 +378,6 @@ class ScenePromptCoordinator @Inject constructor(
      * 提示词弄丢（历史上按"校验不过就丢弃"处理过，上层表现为「照片没拍成」）。
      */
 
-    private suspend fun chatOnce(
-        profile: ModelProfileEntity,
-        apiKey: String,
-        system: String,
-        user: String,
-        useBackgroundGate: Boolean
-    ): String? {
-        // B1 可观测性：把每一跳的耗时/成败记进 RequestTrace（可在调试页用 report() 看）。
-        val startedAt = System.currentTimeMillis()
-        val block = suspend {
-            withTimeoutOrNull(SCENE_CHAT_TIMEOUT_MS) {
-                client.chat(profile, apiKey, system, user).getOrNull()
-            }
-        }
-        val result = if (useBackgroundGate) {
-            com.aster.companion.lite.LiteBackgroundLlmGate.withPermit(block)
-        } else {
-            block()
-        }
-        com.aster.companion.diag.RequestTrace.record(
-            path = "scene:" + profile.modelName,
-            durationMs = System.currentTimeMillis() - startedAt,
-            ok = result != null,
-        )
-        return result
-    }
 
     /**
      * 用户在预览卡里改过 tag 后，仍需过同一套校验才能出图。
@@ -424,7 +399,6 @@ class ScenePromptCoordinator @Inject constructor(
 
     private companion object {
         const val TAG = "ScenePrompt"
-        const val SCENE_CHAT_TIMEOUT_MS = 90_000L
         val WHITESPACE = Regex("\\s+")
     }
 }
