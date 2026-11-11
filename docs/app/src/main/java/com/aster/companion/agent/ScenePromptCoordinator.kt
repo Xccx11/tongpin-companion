@@ -160,18 +160,6 @@ class ScenePromptCoordinator @Inject constructor(
      * 只给「下午」是不够的：15:00 和 19:00 她的处境差得很远（一个大概在外面，一个在家吃饭），
      * 照片的地点、手上在做的事都该跟着变。
      */
-    private fun timeOfDay(): String {
-        val now = java.time.LocalTime.now()
-        val period = when (now.hour) {
-            in 5..8 -> "清晨"
-            in 9..11 -> "上午"
-            in 12..13 -> "中午"
-            in 14..17 -> "下午"
-            in 18..22 -> "晚上"
-            else -> "深夜"
-        }
-        return "%s %02d:%02d".format(period, now.hour, now.minute)
-    }
 
     /**
      * 私聊「发照片」入口：线程上下文自动压缩。
