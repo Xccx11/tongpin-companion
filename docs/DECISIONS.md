@@ -53,3 +53,10 @@
 
 **解法（下一轮）**：搬迁时把新类里的类型引用写成 `ScenePromptCoordinator.ScenePromptInputs`，
 或先把该 data class 提升为顶层类型（更干净，但会牵动调用点）。
+### D6 补充：`decideShot` 的传递依赖（实测）
+
+`decideShot`（行 94-128）**直接**引用：`transport` `cipher` `inputsFor` `situationOf` `character` `conversationProfile`；
+**还通过 `recentBrief(...)` 间接受 `dao` 影响** —— 这类**传递依赖**必须连同被调方法一起搬，否则编译必失败。
+
+**结论**：`decideShot` 不能单独搬，得连同 `recentBrief`（+ `dao` 注入）作为一个**簇**搬进 `SceneDecider`。
+搬迁时的新类需要：`dao` `transport` `cipher` `imageRuleResolver`（给 inputsReader）+ 内建 `SceneInputsReader`/`SceneSituationReader` 实例。
