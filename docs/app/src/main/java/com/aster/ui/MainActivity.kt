@@ -246,10 +246,10 @@ private fun GroupAtmosphere.label(): String = when (this) {
     GroupAtmosphere.LIVELY -> "热闹"
 }
 
-private val com.aster.ui.theme.AsterColorScheme.accentWash: Color
+internal val com.aster.ui.theme.AsterColorScheme.accentWash: Color
     get() = if (isDark) Color(0xFF3B242D) else Color(0xFFFFEEF1)
 
-private val com.aster.ui.theme.AsterColorScheme.accentLine: Color
+internal val com.aster.ui.theme.AsterColorScheme.accentLine: Color
     get() = if (isDark) Color(0xFF70414F) else Color(0xFFE8BBC3)
 
 @Composable
@@ -4217,56 +4217,6 @@ private fun ImagePromptDebugEditor(
     }
 }
 
-@Composable
-private fun ImageApiPoolEditor(
-    entries: List<com.aster.companion.data.ImageApiPoolEntity>,
-    onSave: (String, String, String, String) -> Unit,
-    onDelete: (String) -> Unit
-) {
-    var label by rememberSaveable { mutableStateOf("") }
-    var baseUrl by rememberSaveable { mutableStateOf("") }
-    var model by rememberSaveable { mutableStateOf("") }
-    var apiKey by rememberSaveable { mutableStateOf("") }
-    val colors = AsterTheme.colors
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(top = 14.dp).border(1.dp, colors.accentLine, RoundedCornerShape(AsterMetrics.cardRadius)).background(colors.accentWash, RoundedCornerShape(AsterMetrics.cardRadius)).padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Text("图像 API 池", color = colors.text, fontSize = AsterType.title, fontWeight = FontWeight.SemiBold)
-        Text("主图像服务默认使用标准 /v1/images/generations；同一个电脑网关只配置一次即可。只有真正不同的服务才需要加入备用 API。每项密钥独立加密保存。", color = colors.textMuted, fontSize = AsterType.caption)
-        OutlinedTextField(label, { label = it }, Modifier.fillMaxWidth().keepVisibleWhenKeyboardOpened(), label = { Text("供应商名称") }, singleLine = true, shape = RoundedCornerShape(AsterMetrics.cardRadius))
-        OutlinedTextField(baseUrl, { baseUrl = it }, Modifier.fillMaxWidth().keepVisibleWhenKeyboardOpened(), label = { Text("外网服务地址") }, singleLine = true, shape = RoundedCornerShape(AsterMetrics.cardRadius))
-        OutlinedTextField(model, { model = it }, Modifier.fillMaxWidth().keepVisibleWhenKeyboardOpened(), label = { Text("模型名") }, singleLine = true, shape = RoundedCornerShape(AsterMetrics.cardRadius))
-        OutlinedTextField(apiKey, { apiKey = it }, Modifier.fillMaxWidth().keepVisibleWhenKeyboardOpened(), label = { Text("API Key") }, singleLine = true, shape = RoundedCornerShape(AsterMetrics.cardRadius), visualTransformation = PasswordVisualTransformation())
-        Button(
-            onClick = {
-                onSave(label, baseUrl, model, apiKey)
-                label = ""
-                baseUrl = ""
-                model = ""
-                apiKey = ""
-            },
-            enabled = label.isNotBlank() && baseUrl.isNotBlank() && model.isNotBlank() && apiKey.isNotBlank(),
-            shape = RoundedCornerShape(AsterMetrics.cardRadius)
-        ) { Text("加入 API 池") }
-        if (entries.isEmpty()) {
-            Text("还没有额外 API，当前使用上方主配置。", color = colors.textMuted, fontSize = AsterType.caption)
-        } else {
-            entries.forEach { entry ->
-                Row(
-                    modifier = Modifier.fillMaxWidth().background(colors.surface1, RoundedCornerShape(AsterMetrics.controlRadius)).padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(entry.label, color = colors.text, fontSize = AsterType.body, fontWeight = FontWeight.SemiBold)
-                        Text("${entry.modelName}  ·  ${entry.baseUrl}", color = colors.textMuted, fontSize = AsterType.micro, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    TextButton(onClick = { onDelete(entry.id) }) { Text("删除", color = colors.textSubtle) }
-                }
-            }
-        }
-    }
-}
 
 @Composable
 private fun ImageGenerationTaskViewer(
