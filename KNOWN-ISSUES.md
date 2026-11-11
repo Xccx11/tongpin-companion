@@ -1,37 +1,24 @@
 # 已知问题（Known issues）
 
-## CI 的 `assembleDebug` 步骤失败（debug 签名）
+> 2026-11-11：**CI 的签名问题已修复** ✅ —— 提交 `833ef96` 随仓库分发了一个一次性 debug keystore
+> （`docs/app/debug.keystore`），`localDebug` 改为相对路径引用，CI 现在 **build ✓ / tests ✓** 全绿。
 
-**已定位到根因**（2026-11-11，干净 clone 复现确认）：
+## 历史：CI `assembleDebug` 曾因 debug 签名失败
 
-1. `docs/app/build.gradle.kts` 里 `debug` 构建类型引用了 `signingConfigs.getByName("localDebug")`；
-2. `localDebug` 这个 signingConfig 原先写死 Windows 路径（`D:\.android\debug.keystore`），
-   在任何没有 `D:` 盘的环境（Linux/macOS CI）必然失败；
-3. 只删 `localDebug` 配置、保留引用会报 `SigningConfig with name 'localDebug' not found`；
-   两者都删则报 Gradle 8.14 的 `signingConfigData.storeFile ... unreadable inputs`。
+**根因**：`docs/app/build.gradle.kts` 的 `debug` 构建类型引用 `signingConfigs.getByName("localDebug")`，
+而 `localDebug` 的 `storeFile` 写死为 `D:\.android\debug.keystore`（Windows 盘符）——
+任何没有 `D:` 盘的环境（Linux/macOS CI）必然失败。
 
-**当前状态**：
-- ✅ `Unit tests` 在 CI 上通过（1089 个测试全绿）；
-- ❌ `Assemble debug APK` 仍失败（仅在 CI / 非 Windows 环境）；
-- ✅ **本地 Windows 构建正常**（`BUILD SUCCESSFUL`）。
+**修复**（`833ef96`）：
 
-**推荐修复（改为一次性 debug 密钥，随仓库分发）**：
-
-1. 生成一个 debug keystore 并提交到仓库（debug 密钥是一次性的，公开无害）：
+1. 生成一次性 debug 密钥并**随仓库分发**（debug 密钥可公开，仅用于本地/CI 构建）：
    ```
    keytool -genkeypair -keystore docs/app/debug.keystore -storepass android \
      -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
      -dname "CN=Android Debug,O=Android,C=US"
    ```
-2. 在 `signingConfigs` 里新增：
-   ```kotlin
-   create("localDebug") {
-       storeFile = rootProject.file("docs/app/debug.keystore")
-       storePassword = "android"
-       keyAlias = "androiddebugkey"
-       keyPassword = "android"
-   }
-   ```
-3. `debug { signingConfig = signingConfigs.getByName("localDebug") }` 保持引用一致。
+2. `localDebug.storeFile` 改为 `rootProject.file("docs/app/debug.keystore")`（相对路径，跨平台）。
+3. 其余密码/别名保持不变，`debug` 的引用保持不变。
 
-> 注意：不要把**正式发布密钥**放进仓库；上面这个只用于 debug 构建。
+> ⚠️ 该密钥**只用于 debug 构建**；正式发布请使用你自己的签名配置（`release` 走
+> `KEYSTORE_PATH` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` 环境变量）。

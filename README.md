@@ -1,3 +1,7 @@
+[![CI](https://github.com/Xccx11/tongpin-companion/actions/workflows/ci.yml/badge.svg)](https://github.com/Xccx11/tongpin-companion/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7F52FF?logo=kotlin)](https://kotlinlang.org)
+[![Platform](https://img.shields.io/badge/Android-minSdk%2026-3DDC84?logo=android)](https://developer.android.com)
 # 同频 · Tongpin
 
 一个本地优先的 AI 伴侣 App（Android，Kotlin + Jetpack Compose），把「聊天 / 生活状态 / 主动联系 / 场景照片」串成一条连续的体验。
