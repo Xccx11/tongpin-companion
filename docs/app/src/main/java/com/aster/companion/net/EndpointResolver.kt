@@ -132,6 +132,20 @@ object EndpointResolver {
      */
     @Volatile private var snapshot: Map<String, String> = emptyMap()
 
+    /**
+     * 清空所有进程级缓存（探测结果 + baseUrl 快照）。
+     *
+     * 存在的意义：这些缓存是**进程级全局**的，测试之间会互相污染；同时给"切换网络环境"
+     * 这类操作一个明确的失效入口。A5 的目标是把它们挪进可注入的实例，届时这个方法会随之消失。
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun clearCaches() {
+        probeUrl = null
+        probeOk = false
+        probeAt = 0L
+        snapshot = emptyMap()
+    }
+
     fun cachedBaseUrl(profileId: String, fallback: String): String =
         snapshot[profileId]?.takeIf { it.isNotBlank() } ?: fallback
 
