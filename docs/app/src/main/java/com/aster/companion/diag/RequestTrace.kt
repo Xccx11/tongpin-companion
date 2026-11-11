@@ -68,4 +68,25 @@ object RequestTrace {
     internal fun clearForTest() {
         synchronized(lock) { buffer.clear() }
     }
+    /**
+     * 把 [summary] 渲染成人能读的几行（给界面/调试页直接用）。
+     *
+     * 例：
+     * ```
+     * 请求 12 次 · 失败 1 次
+     * 平均 820ms · P95 2400ms
+     * 最慢：/v1/images/generations 2400ms
+     * ```
+     */
+    fun report(): String {
+        val s = summary()
+        if (s.total == 0) return "还没有请求记录"
+        val slowest = synchronized(lock) { buffer.maxByOrNull { it.durationMs } }
+        val lines = mutableListOf(
+            "请求 ${s.total} 次 · 失败 ${s.failures} 次",
+            "平均 ${s.averageMs}ms · P95 ${s.p95Ms}ms",
+        )
+        if (slowest != null) lines += "最慢：${slowest.path} ${slowest.durationMs}ms"
+        return lines.joinToString("\n")
+    }
 }
