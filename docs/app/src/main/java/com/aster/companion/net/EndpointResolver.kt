@@ -60,9 +60,10 @@ object EndpointResolver {
     /** 探测结果缓存时长：30 秒内不重复探测。 */
     private const val PROBE_TTL_MS = 30_000L
 
-    @Volatile private var probeUrl: String? = null
-    @Volatile private var probeOk: Boolean = false
-    @Volatile private var probeAt: Long = 0L
+    // A5：探测结果三字段收进一个不可变状态，一次 CAS 同时更新 —— 原来分三次写，
+    // 并发下可能出现"url 是新一轮探测的、ok/at 还是上一轮的"这种撕裂。
+    private data class ProbeState(val url: String?, val ok: Boolean, val at: Long)
+    private val probe = java.util.concurrent.atomic.AtomicReference(ProbeState(null, false, 0L))
 
     // ---------------------------------------------------------------- 读
 
@@ -142,9 +143,7 @@ object EndpointResolver {
      */
     @androidx.annotation.VisibleForTesting
     internal fun clearCaches() {
-        probeUrl = null
-        probeOk = false
-        probeAt = 0L
+        probe.set(ProbeState(null, false, 0L))
         snapshot.set(emptyMap())
     }
 
@@ -182,8 +181,8 @@ object EndpointResolver {
     /** 只做一次 TCP 连接：够判断"家里那台机器在不在"，又不会拖慢请求。 */
     private suspend fun reachable(url: String): Boolean {
         val now = System.currentTimeMillis()
-        val cachedUrl = probeUrl
-        if (cachedUrl == url && now - probeAt < PROBE_TTL_MS) return probeOk
+        val cached = probe.get()
+        if (cached.url == url && now - cached.at < PROBE_TTL_MS) return cached.ok
 
         val ok = withContext(Dispatchers.IO) {
             val uri = runCatching { URI(url) }.getOrNull() ?: return@withContext false
@@ -196,9 +195,7 @@ object EndpointResolver {
                 true
             }.getOrDefault(false)
         }
-        probeUrl = url
-        probeOk = ok
-        probeAt = now
+        probe.set(ProbeState(url, ok, now))
         return ok
     }
 
@@ -207,8 +204,6 @@ object EndpointResolver {
 
     /** 测试用：清掉探测缓存。 */
     internal fun resetProbeCache() {
-        probeUrl = null
-        probeOk = false
-        probeAt = 0L
+        probe.set(ProbeState(null, false, 0L))
     }
 }
