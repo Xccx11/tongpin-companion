@@ -72,3 +72,12 @@
    → 把 `EndpointCache` 改成 `public`（它本身无副作用，暴露无害）。
 
 这三点解决后，`object EndpointResolver` 才能安全降级成薄委托。
+### D6 补充：Hilt 拒绝 `@Inject` 构造函数的默认参数（实测）
+
+把 `OpenAiCompatibleClient` 的构造函数加上 `endpointRegistry: EndpointRegistry` 后，
+**Kotlin 编译通过**但 `hiltJavaCompileDebug` 失败 —— 因为 `EndpointRegistry` 的构造函数写了
+`private val cache: EndpointCache = EndpointCache()`：**Dagger 不支持默认参数**。
+
+**修法（两处）**：
+1. `EndpointRegistry` 去掉默认值：`private val cache: EndpointCache`；
+2. `EndpointCache` 加 `@Inject constructor()`（它有无参构造，但要显式标注才能被注入）。
