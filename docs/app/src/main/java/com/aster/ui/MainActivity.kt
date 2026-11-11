@@ -2511,12 +2511,6 @@ private fun CharacterStatusCapsule(
             ) {
                 Text("立即同步她的状态", color = colors.primary)
 
-            // 当前「内网 / 外网」实际生效在哪 —— 与设置页同一个来源（EndpointResolver）。
-            val netState by homeViewModel.networkStatus.collectAsState()
-            LaunchedEffect(Unit) { homeViewModel.refreshNetworkStatus() }
-            if (netState.isNotBlank()) {
-                Text(netState, color = colors.textMuted, fontSize = AsterType.micro)
-            }
             }
         }
         Row(
