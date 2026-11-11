@@ -675,6 +675,13 @@ class CompanionHomeViewModel @Inject constructor(
     fun syncLivingState(characterId: String) = viewModelScope.launch(crashGuard) {
         // B2 离线优先：每次同步顺带尝试重放离线队列。
         // 当前 handler 是占位（只记录、返回 false = 保留待重放），等照片重放管线接入后替换。
+        // B2 持久化：队列为空时先从磁盘恢复（进程重启后动作不丢）。
+        runCatching {
+            val prefs = appContext.getSharedPreferences("offline_queue", android.content.Context.MODE_PRIVATE)
+            if (com.aster.companion.diag.PendingActionQueue.size() == 0) {
+                com.aster.companion.diag.PendingActionQueue.restore(prefs.getString("dump", "").orEmpty())
+            }
+        }
         runCatching {
             com.aster.companion.diag.PendingActionQueue.drain { action ->
                 if (action.kind != "scene_photo") return@drain false
