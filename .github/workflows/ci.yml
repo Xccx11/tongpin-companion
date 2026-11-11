@@ -17,8 +17,9 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # 注意：ubuntu-latest 镜像自带 Android SDK（ANDROID_HOME 已就绪），
+      # 缺失的 platform 会由 AGP 自动补装；因此不再使用 android-actions/setup-android
+      # （它的 v3 目标 Node 20，已被 runner 强制升级到 Node 24 而失效）。
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -40,3 +41,4 @@ jobs:
         with:
           name: test-results
           path: docs/app/build/test-results/testDebugUnitTest/
+          if-no-files-found: ignore
