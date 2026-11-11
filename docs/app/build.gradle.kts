@@ -31,7 +31,7 @@ android {
 
     signingConfigs {
         create("localDebug") {
-            storeFile = File("D:\\.android\\debug.keystore")
+            storeFile = rootProject.file("docs/app/debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
