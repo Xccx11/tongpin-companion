@@ -4197,23 +4197,8 @@ private fun ModelEditor(
             fontSize = AsterType.caption
         )
         if (profile?.encryptedApiKey != null) Text("密钥已安全保存", color = colors.primary, fontSize = AsterType.caption, fontWeight = FontWeight.SemiBold)
-        OutlinedTextField(baseUrl, { baseUrl = it }, Modifier.fillMaxWidth().keepVisibleWhenKeyboardOpened(), label = { Text("外网 Base URL（原来的地址，可配置）") }, singleLine = true, shape = RoundedCornerShape(AsterMetrics.cardRadius))
-        // 内网 / 外网双配置：外网地址就用上面这个 baseUrl，这里再存一个内网地址。
-        run {
-            val netVm: com.aster.companion.ui.CompanionHomeViewModel =
-                androidx.hilt.navigation.compose.hiltViewModel()
-            val netMode by netVm.networkMode.collectAsState()
-            val netStatus by netVm.networkStatus.collectAsState()
-            val netLan by netVm.lanBaseUrl.collectAsState()
-            LaunchedEffect(profile?.id) { profile?.id?.let { netVm.loadLanBaseUrl(it) } }
-            NetworkModeSection(
-                mode = netMode,
-                lanUrl = netLan,
-                status = netStatus,
-                onMode = { netVm.setNetworkMode(it) },
-                onLanUrl = { url -> profile?.id?.let { netVm.setLanBaseUrl(it, url) } },
-            )
-        }
+        OutlinedTextField(baseUrl, { baseUrl = it }, Modifier.fillMaxWidth().keepVisibleWhenKeyboardOpened(), label = { Text("服务地址（Base URL）") }, singleLine = true, shape = RoundedCornerShape(AsterMetrics.cardRadius))
+
         OutlinedTextField(apiKey, { apiKey = it }, Modifier.fillMaxWidth().keepVisibleWhenKeyboardOpened(), label = { Text(if (profile?.encryptedApiKey == null) "API Key" else "API Key（留空则保留已保存的密钥）") }, singleLine = true, shape = RoundedCornerShape(AsterMetrics.cardRadius), visualTransformation = PasswordVisualTransformation())
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(AsterMetrics.gap)) {
             Text("模型", color = colors.textSubtle, fontSize = AsterType.label)
@@ -4345,23 +4330,8 @@ private fun ComfyUiEditor(
             },
             enabled = !discovering
         ) { Text(if (discovering) "正在查找…" else "一键连接当前 Wi-Fi 的 ComfyUI", color = colors.primary) }
-        OutlinedTextField(baseUrl, { baseUrl = it; saveStatus = null }, Modifier.fillMaxWidth().keepVisibleWhenKeyboardOpened(), label = { Text("外网 ComfyUI 地址") }, singleLine = true, shape = RoundedCornerShape(AsterMetrics.cardRadius))
-        // 内网 / 外网双配置（出图这条链也要能切）：外网 = 上面那个 ComfyUI 地址。
-        run {
-            val netVm: com.aster.companion.ui.CompanionHomeViewModel =
-                androidx.hilt.navigation.compose.hiltViewModel()
-            val netMode by netVm.networkMode.collectAsState()
-            val netStatus by netVm.networkStatus.collectAsState()
-            val netLan by netVm.lanBaseUrl.collectAsState()
-            LaunchedEffect(profile?.id) { profile?.id?.let { netVm.loadLanBaseUrl(it) } }
-            NetworkModeSection(
-                mode = netMode,
-                lanUrl = netLan,
-                status = netStatus,
-                onMode = { netVm.setNetworkMode(it) },
-                onLanUrl = { url -> profile?.id?.let { netVm.setLanBaseUrl(it, url) } },
-            )
-        }
+        OutlinedTextField(baseUrl, { baseUrl = it; saveStatus = null }, Modifier.fillMaxWidth().keepVisibleWhenKeyboardOpened(), label = { Text("ComfyUI 地址") }, singleLine = true, shape = RoundedCornerShape(AsterMetrics.cardRadius))
+
         Row(horizontalArrangement = Arrangement.spacedBy(AsterMetrics.gap)) {
             Button(
                 onClick = {
@@ -4726,7 +4696,7 @@ private fun NetworkModeSection(
             lanUrl,
             onLanUrl,
             Modifier.fillMaxWidth().keepVisibleWhenKeyboardOpened(),
-            label = { Text("内网 Base URL（留空 = 该模型只走外网）") },
+            label = { Text("内网地址（可选）") },
             singleLine = true,
             shape = RoundedCornerShape(AsterMetrics.cardRadius),
         )

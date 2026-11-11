@@ -12,9 +12,9 @@ import org.junit.Test
 class ScenePromptFormatTest {
 
     @Test
-    fun `z-image 系模型走中文自然语言`() {
+    fun `所有模型统一走英文 tag`() {
         listOf("z-image-turbo-nsfw", "z_image_nsfw_v2-Q8_0", "Lumina2", "qwen-image-edit", "zimage-turbo").forEach { name ->
-            assertEquals(name, ScenePromptFormat.CHINESE_NATURAL, ScenePromptFormat.forModel(name))
+            assertEquals(name, ScenePromptFormat.ENGLISH_TAGS, ScenePromptFormat.forModel(name))
         }
     }
 

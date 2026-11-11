@@ -56,19 +56,15 @@ enum class ScenePromptFormat {
          * **设置页的「生图规则集」优先**：用户显式选了 Krea 2 / Z-Image / WAI 就用那套，
          * 这样换成官方图像 API 或没见过的模型名时，也不会莫名其妙掉到 tag 规则去。
          */
-        fun forModel(modelName: String): ScenePromptFormat {
-            com.aster.companion.lite.ImageRuleFormatOverride.current()?.let { return it }
-            val name = modelName.trim().lowercase()
-            // Krea 2 走英文自然语言（官方 prompting.md 的示例、expansion.txt 全是英文，
-            // 它对英文的遵循度明显高于中文）；z-image 系仍走中文自然语言。
-            return when {
-                KREA2_MARKERS.any { name.contains(it) } -> ENGLISH_NATURAL
-                ZIMAGE_MARKERS.any { name.contains(it) } -> CHINESE_NATURAL
-                NATURAL_LANGUAGE_MARKERS.any { name.contains(it) } -> NATURAL_LANGUAGE
-                else -> ENGLISH_TAGS
-            }
-        }
-
+        /**
+         * **统一英文 tag 方式**（开源版简化，2026-11-11）。
+         *
+         * 以前这里会按模型名在「英文自然语言 / 中文自然语言 / tag」之间切换，
+         * 还要看设置页「生图规则集」的覆盖 —— 规则一套、解析器一套，既难懂也难调。
+         * 现在只有一种形态：**逗号分隔的英文 tag**，所有 OpenAI-Images 兼容后端都吃这一套。
+         */
+        @Suppress("UNUSED_PARAMETER")
+        fun forModel(modelName: String): ScenePromptFormat = ENGLISH_TAGS
         /**
          * 走**英文自然语言 + `image.sceneRule.krea2en`** 的模型。
          *
