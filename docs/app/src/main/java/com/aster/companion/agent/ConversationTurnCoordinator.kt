@@ -901,7 +901,7 @@ class ConversationTurnCoordinator @Inject constructor(
                     com.aster.companion.diag.PendingActionQueue.enqueue(
                         key = "scene:" + threadId + ":" + sceneIntent.take(24),
                         kind = "scene_photo",
-                        payload = sceneIntent,
+                        payload = character.id + "\n" + sceneIntent,
                     )
                     liteScenePhotoBus.publish(
                         com.aster.companion.lite.ScenePhotoRequest(
