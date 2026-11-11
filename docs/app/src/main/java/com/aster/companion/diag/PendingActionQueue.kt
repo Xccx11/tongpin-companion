@@ -97,4 +97,61 @@ object PendingActionQueue {
         }
         return done
     }
+    /**
+     * 导出为**纯文本快照**（每行一条，tab 分隔；换行/tab 会转义）。
+     *
+     * 为什么用文本而不是 JSON：这里只做"进程重启后还在"，不需要跨版本 schema；
+     * 文本格式可读、可测、零依赖。
+     */
+    fun export(): String = synchronized(lock) {
+        order.mapNotNull { byKey[it] }.joinToString("\n") { a ->
+            listOf(
+                a.key.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n"),
+                a.kind.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n"),
+                a.payload.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n"),
+                a.enqueuedAtMillis.toString(),
+            ).joinToString("\t")
+        }
+    }
+
+    /** 用 [export] 的产物恢复队列（覆盖当前内容）。能解析的行才收，坏行忽略。 */
+    fun restore(text: String) {
+        if (text.isBlank()) return
+        synchronized(lock) {
+            order.clear()
+            byKey.clear()
+            for (line in text.split("\n")) {
+                if (line.isBlank()) continue
+                val parts = line.split("\t")
+                if (parts.size != 4) continue
+                val action = Action(
+                    key = unescapeField(parts[0]),
+                    kind = unescapeField(parts[1]),
+                    payload = unescapeField(parts[2]),
+                    enqueuedAtMillis = parts[3].toLongOrNull() ?: 0L,
+                )
+                if (action.key.isBlank()) continue
+                byKey[action.key] = action
+                order.addLast(action.key)
+            }
+            while (order.size > capacity) byKey.remove(order.removeFirst())
+        }
+    }
+
+    private fun unescapeField(s: String): String {
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '\\' && i + 1 < s.length) {
+                when (s[i + 1]) {
+                    'n' -> { sb.append('\n'); i += 2 }
+                    't' -> { sb.append('\t'); i += 2 }
+                    '\\' -> { sb.append('\\'); i += 2 }
+                    else -> { sb.append(c); i++ }
+                }
+            } else { sb.append(c); i++ }
+        }
+        return sb.toString()
+    }
 }

@@ -102,4 +102,31 @@ class PendingActionQueueTest {
         assertEquals(0, done)
         assertEquals(1, PendingActionQueue.size())
     }
+    @Test
+    fun `round trip survives export and restore`() {
+        PendingActionQueue.enqueue("a", "scene_photo", "char1\nintent with\ttab")
+        PendingActionQueue.enqueue("b", "chat", "plain")
+
+        val dump = PendingActionQueue.export()
+        PendingActionQueue.clearForTest()
+        assertEquals(0, PendingActionQueue.size())
+
+        PendingActionQueue.restore(dump)
+        val snap = PendingActionQueue.snapshot()
+        assertEquals(listOf("a", "b"), snap.map { it.key })
+        assertEquals("char1\nintent with\ttab", snap[0].payload)
+        assertEquals("scene_photo", snap[0].kind)
+    }
+
+    @Test
+    fun `restore ignores malformed lines`() {
+        PendingActionQueue.restore("good\tchat\tpayload\t1\nbad line\n\t\t\t\n")
+        assertEquals(1, PendingActionQueue.size())
+        assertEquals("good", PendingActionQueue.peek()?.key)
+    }
+
+    @Test
+    fun `export of empty queue is empty string`() {
+        assertEquals("", PendingActionQueue.export())
+    }
 }
