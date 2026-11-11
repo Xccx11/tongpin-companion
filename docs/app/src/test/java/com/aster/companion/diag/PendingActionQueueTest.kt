@@ -63,4 +63,43 @@ class PendingActionQueueTest {
         PendingActionQueue.enqueue("y", "photo", "p2")
         assertEquals(listOf("x", "y"), PendingActionQueue.snapshot().map { it.key })
     }
+    @Test
+    fun `drain replays in order and removes successes`() = kotlinx.coroutines.runBlocking {
+        PendingActionQueue.enqueue("a", "scene_photo", "p1")
+        PendingActionQueue.enqueue("b", "scene_photo", "p2")
+
+        val seen = mutableListOf<String>()
+        val done = PendingActionQueue.drain { action ->
+            seen += action.key
+            true
+        }
+
+        assertEquals(2, done)
+        assertEquals(listOf("a", "b"), seen)
+        assertEquals(0, PendingActionQueue.size())
+    }
+
+    @Test
+    fun `drain keeps failing action and stops`() = kotlinx.coroutines.runBlocking {
+        PendingActionQueue.enqueue("a", "scene_photo", "p1")
+        PendingActionQueue.enqueue("b", "scene_photo", "p2")
+
+        val attempts = mutableListOf<String>()
+        val done = PendingActionQueue.drain { action ->
+            attempts += action.key
+            false
+        }
+
+        assertEquals(0, done)
+        assertEquals(listOf("a"), attempts)
+        assertEquals(2, PendingActionQueue.size())
+    }
+
+    @Test
+    fun `drain treats handler exception as failure`() = kotlinx.coroutines.runBlocking {
+        PendingActionQueue.enqueue("a", "scene_photo", "p1")
+        val done = PendingActionQueue.drain { throw IllegalStateException("boom") }
+        assertEquals(0, done)
+        assertEquals(1, PendingActionQueue.size())
+    }
 }
