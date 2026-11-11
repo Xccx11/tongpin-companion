@@ -1,0 +1,31 @@
+package com.aster.companion.lite
+
+import java.util.concurrent.atomic.AtomicBoolean
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * 「空闲让路」期间被推迟的后台工作（A 方案：**延后，不丢弃**）。
+ *
+ * 目前只登记一样东西：**对话后那次世界推演**（时间胶囊的数据源）。用户在聊天时它不立刻跑，
+ * 等后台空闲那一拍（`CompanionSystemService` 的 30 秒 tick）再取走执行。
+ *
+ * 为什么只有它：其他后台工作（世界调度、朋友圈、主动陪伴、探活）本身就是每拍重算的，
+ * 跳过一拍下一拍自然还会来；而世界推演只在"对话结束"这一个事件上触发，跳过了就没人再叫它，
+ * 所以必须记一笔待办。
+ *
+ * **不要把日记放进来**：日记是「主动联系按条件关闭」那一刻就必须开始写的，
+ * 放进这个纯内存的待办里会在进程退出时丢掉。
+ */
+@Singleton
+class BackgroundDeferredWork @Inject constructor() {
+    private val worldSimulationDue = AtomicBoolean(false)
+
+    /** 对话后的世界推演被推迟了一次。 */
+    fun markWorldSimulation() {
+        worldSimulationDue.set(true)
+    }
+
+    /** 取走一次"待补跑的世界推演"；false 表示没有待办。 */
+    fun consumeWorldSimulation(): Boolean = worldSimulationDue.compareAndSet(true, false)
+}

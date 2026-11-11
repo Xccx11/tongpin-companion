@@ -1,0 +1,445 @@
+package com.aster.companion.data
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Transaction
+import com.aster.companion.domain.EventState
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface CompanionDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertWorldUserState(state: WorldUserStateEntity)
+    @Query("SELECT * FROM companion_world_user_state WHERE id = 'user'") suspend fun worldUserState(): WorldUserStateEntity?
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertWorldLocations(locations: List<WorldLocationEntity>)
+    @Query("SELECT * FROM companion_world_locations ORDER BY id") suspend fun worldLocations(): List<WorldLocationEntity>
+    @Query("SELECT * FROM companion_world_locations WHERE id = :locationId") suspend fun worldLocation(locationId: String): WorldLocationEntity?
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertWorldTimelineEvent(event: WorldTimelineEventEntity)
+    @Query("SELECT * FROM companion_world_timeline_events WHERE status IN ('PLANNED', 'EVALUATING', 'WAITING_FOR_USER', 'CONFIRMED') ORDER BY scheduledAt") suspend fun activeWorldTimelineEvents(): List<WorldTimelineEventEntity>
+    @Query("SELECT * FROM companion_world_timeline_events WHERE userParticipation IN ('OPTIONAL', 'REQUIRED') AND status IN ('PLANNED', 'EVALUATING', 'WAITING_FOR_USER') ORDER BY scheduledAt") fun observeWorldInvitations(): Flow<List<WorldTimelineEventEntity>>
+    @Query("SELECT * FROM companion_world_timeline_events WHERE id = :eventId") suspend fun worldTimelineEvent(eventId: String): WorldTimelineEventEntity?
+    @Query("UPDATE companion_world_timeline_events SET status = :status, decisionJson = :decisionJson, updatedAt = :updatedAt WHERE id = :eventId") suspend fun updateWorldTimelineEvent(eventId: String, status: String, decisionJson: String, updatedAt: Long)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertCharacterLifeState(state: CharacterLifeStateEntity)
+    @Query("SELECT * FROM companion_character_life_state WHERE characterId = :characterId") suspend fun lifeState(characterId: String): CharacterLifeStateEntity?
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertRelationship(relationship: RelationshipEntity)
+    @Query("SELECT * FROM companion_relationships WHERE characterAId = :aId AND characterBId = :bId") suspend fun relationship(aId: String, bId: String): RelationshipEntity?
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertActivity(activity: ActivityEntity)
+    @Query("SELECT * FROM companion_activities WHERE status = 'running'") suspend fun runningActivities(): List<ActivityEntity>
+    @Query("UPDATE companion_activities SET status = :status, finishedAt = :finishedAt, effectJson = :effectJson WHERE id = :id") suspend fun finishActivity(id: String, status: String, finishedAt: Long, effectJson: String)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertPersonality(personality: CharacterPersonalityEntity)
+    @Query("SELECT * FROM companion_character_personality WHERE characterId = :characterId") suspend fun personality(characterId: String): CharacterPersonalityEntity?
+    @Query("SELECT * FROM companion_character_goals WHERE characterId = :characterId AND resolved = 0 AND expireTime > :now ORDER BY importance DESC") suspend fun activeGoals(characterId: String, now: Long): List<CharacterGoalEntity>
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertDecisionChain(chain: DecisionChainEntity)
+    @Query("SELECT * FROM companion_decision_chains WHERE characterId = :characterId ORDER BY createdAt DESC LIMIT :limit") suspend fun recentDecisionChains(characterId: String, limit: Int): List<DecisionChainEntity>
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertWorldStateRow(row: WorldStateRowEntity)
+    @Query("SELECT * FROM companion_world_state WHERE id = 'world'") suspend fun primaryWorldState(): WorldStateRowEntity?
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertFutureTimeline(timeline: FutureTimelineEntity)
+    @Query("SELECT * FROM companion_future_timelines WHERE status = 'planned' OR status = 'running' ORDER BY startTime ASC") suspend fun activeTimelines(): List<FutureTimelineEntity>
+    @Query("UPDATE companion_future_timelines SET status = :status WHERE id = :id") suspend fun updateTimelineStatus(id: String, status: String)
+    @Query("DELETE FROM companion_future_timelines WHERE id = :id") suspend fun deleteTimeline(id: String)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertWorldEvent(event: WorldEventEntity)
+    @Query("SELECT * FROM companion_world_events ORDER BY eventTime DESC LIMIT :limit") suspend fun recentWorldEvents(limit: Int): List<WorldEventEntity>
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertCharacter(character: CharacterEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertThread(thread: ThreadEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertParticipant(participant: ThreadParticipantEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertMessage(message: MessageEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertMemory(memory: MemoryEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertDiaryPhoto(photo: DiaryPhotoEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertMomentPost(post: MomentPostEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertMomentMedia(media: MomentMediaEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertMomentReaction(reaction: MomentReactionEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertMomentComment(comment: MomentCommentEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertEvent(event: EventEntity)
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertEventRecipients(recipients: List<EventRecipientEntity>)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertTurn(turn: AgentTurnEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertAudit(audit: ActionAuditEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertPendingAction(action: PendingActionEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertModel(profile: ModelProfileEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertImageApiPool(entry: ImageApiPoolEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertSnapshotManifest(manifest: SnapshotManifestEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertTimelineEvent(event: TimelineEventEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertWorldState(worldState: WorldStateEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertSemanticMemory(memory: SemanticMemoryEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertDurableTask(task: DurableTaskEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertAgentRun(run: AgentRunEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertFamilyGroupFact(fact: FamilyGroupFactEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertGroupMemberState(state: GroupMemberStateEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertGroupSettings(settings: GroupSettingsEntity)
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertGroupPrivateFollowUpUses(uses: List<GroupPrivateFollowUpUseEntity>)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertGroupDerivedMemoryLink(link: GroupDerivedMemoryLinkEntity)
+
+    @Query("SELECT * FROM companion_characters ORDER BY updatedAt DESC") fun observeCharacters(): Flow<List<CharacterEntity>>
+    @Query("SELECT * FROM companion_characters") suspend fun allCharacters(): List<CharacterEntity>
+    @Query("SELECT COUNT(*) FROM companion_characters") suspend fun characterCount(): Int
+    @Query("SELECT * FROM companion_characters WHERE id = :characterId") suspend fun character(characterId: String): CharacterEntity?
+    @Query("SELECT id FROM companion_characters ORDER BY updatedAt DESC") suspend fun characterIds(): List<String>
+    @Query("SELECT * FROM companion_threads ORDER BY updatedAt DESC") fun observeThreads(): Flow<List<ThreadEntity>>
+    @Query("SELECT * FROM companion_threads") suspend fun allThreads(): List<ThreadEntity>
+    @Query("SELECT * FROM companion_thread_participants ORDER BY ordinal ASC") fun observeParticipants(): Flow<List<ThreadParticipantEntity>>
+    @Query("SELECT * FROM companion_thread_participants") suspend fun allParticipants(): List<ThreadParticipantEntity>
+    @Query("SELECT * FROM companion_threads WHERE id = :threadId") suspend fun thread(threadId: String): ThreadEntity?
+    @Query("SELECT * FROM companion_memories ORDER BY updatedAt DESC") fun observeMemories(): Flow<List<MemoryEntity>>
+    @Query("SELECT * FROM companion_memories WHERE threadId = :threadId AND kind != 'CONVERSATION' ORDER BY updatedAt DESC") suspend fun memoriesForThread(threadId: String): List<MemoryEntity>
+    @Query("SELECT * FROM companion_diary_photos ORDER BY createdAt DESC") fun observeDiaryPhotos(): Flow<List<DiaryPhotoEntity>>
+    @Query("SELECT * FROM companion_diary_photos") suspend fun allDiaryPhotos(): List<DiaryPhotoEntity>
+    @Query("SELECT * FROM companion_moment_posts ORDER BY createdAt DESC") fun observeMomentPosts(): Flow<List<MomentPostEntity>>
+    @Query("SELECT * FROM companion_moment_posts ORDER BY createdAt DESC") suspend fun allMomentPosts(): List<MomentPostEntity>
+    @Query("SELECT * FROM companion_moment_posts WHERE id = :postId") suspend fun momentPost(postId: String): MomentPostEntity?
+    @Query("SELECT * FROM companion_moment_posts WHERE authorCharacterId = :characterId ORDER BY createdAt DESC LIMIT 1") suspend fun latestCharacterMoment(characterId: String): MomentPostEntity?
+    @Query("SELECT * FROM companion_moment_posts ORDER BY createdAt DESC LIMIT :limit") suspend fun recentMomentPosts(limit: Int): List<MomentPostEntity>
+    @Query("SELECT * FROM companion_moment_media ORDER BY postId, ordinal") fun observeMomentMedia(): Flow<List<MomentMediaEntity>>
+    @Query("SELECT * FROM companion_moment_media") suspend fun allMomentMedia(): List<MomentMediaEntity>
+    @Query("SELECT * FROM companion_moment_comments ORDER BY createdAt ASC") fun observeMomentComments(): Flow<List<MomentCommentEntity>>
+    @Query("SELECT * FROM companion_moment_comments") suspend fun allMomentComments(): List<MomentCommentEntity>
+    @Query("SELECT * FROM companion_moment_comments WHERE id = :commentId") suspend fun momentComment(commentId: String): MomentCommentEntity?
+    @Query("SELECT * FROM companion_moment_comments WHERE postId = :postId AND authorType = 'CHARACTER' AND authorCharacterId = :characterId LIMIT 1") suspend fun characterMomentComment(postId: String, characterId: String): MomentCommentEntity?
+    @Query("SELECT * FROM companion_moment_comments WHERE postId = :postId AND authorType = 'CHARACTER' AND authorCharacterId = :characterId AND replyToCommentId = :replyToCommentId LIMIT 1") suspend fun characterMomentReply(postId: String, characterId: String, replyToCommentId: String): MomentCommentEntity?
+    @Query("SELECT * FROM companion_moment_reactions ORDER BY createdAt ASC") fun observeMomentReactions(): Flow<List<MomentReactionEntity>>
+    @Query("SELECT * FROM companion_moment_reactions") suspend fun allMomentReactions(): List<MomentReactionEntity>
+    @Query("SELECT * FROM companion_moment_reactions WHERE postId = :postId AND actorType = :actorType AND actorId = :actorId AND kind = 'LIKE' LIMIT 1") suspend fun momentLike(postId: String, actorType: String, actorId: String): MomentReactionEntity?
+    @Query("SELECT * FROM companion_memories") suspend fun allMemories(): List<MemoryEntity>
+    @Query("SELECT * FROM companion_memories WHERE id = :memoryId") suspend fun memory(memoryId: String): MemoryEntity?
+    @Query("SELECT * FROM companion_messages WHERE threadId = :threadId ORDER BY createdAt ASC") fun observeMessages(threadId: String): Flow<List<MessageEntity>>
+    @Query("SELECT * FROM companion_messages") suspend fun allMessages(): List<MessageEntity>
+    @Query("SELECT * FROM companion_messages WHERE threadId = :threadId ORDER BY createdAt ASC, id ASC") suspend fun allMessagesForThread(threadId: String): List<MessageEntity>
+    @Query("SELECT * FROM companion_messages ORDER BY createdAt DESC") fun observeAllMessages(): Flow<List<MessageEntity>>
+    @Query("SELECT * FROM companion_messages WHERE threadId = :threadId ORDER BY createdAt DESC LIMIT :limit") suspend fun recentMessages(threadId: String, limit: Int): List<MessageEntity>
+    @Query("SELECT MAX(createdAt) FROM companion_messages") suspend fun latestMessageTime(): Long?
+    /** 最近一条**用户**发的消息时间（跨所有会话）：后台「空闲让路」判定的依据。 */
+    @Query("SELECT MAX(createdAt) FROM companion_messages WHERE fromUser = 1") suspend fun latestUserMessageAt(): Long?
+    @Query("SELECT * FROM companion_messages WHERE id = :messageId") suspend fun message(messageId: String): MessageEntity?
+    @Query("SELECT * FROM companion_messages WHERE id LIKE 'image-message:' || :actionId || '%' ORDER BY createdAt ASC") suspend fun imagePlaceholderMessages(actionId: String): List<MessageEntity>
+    @Query("SELECT t.* FROM companion_threads t INNER JOIN companion_thread_participants p ON p.threadId = t.id WHERE t.type = 'PRIVATE' AND p.characterId = :characterId ORDER BY t.updatedAt DESC LIMIT 1") suspend fun latestPrivateThread(characterId: String): ThreadEntity?
+    @Query("SELECT characterId FROM companion_thread_participants WHERE threadId = :threadId ORDER BY ordinal ASC") suspend fun participantIds(threadId: String): List<String>
+    @Query("SELECT t.title FROM companion_threads t INNER JOIN companion_thread_participants p ON p.threadId = t.id WHERE t.type = 'GROUP' AND p.characterId = :characterId ORDER BY t.updatedAt DESC") suspend fun groupThreadTitlesForCharacter(characterId: String): List<String>
+    @Query("SELECT * FROM companion_events WHERE state IN ('NEW', 'DEFERRED') ORDER BY occurredAt ASC") suspend fun pendingEvents(): List<EventEntity>
+    @Query("SELECT * FROM companion_events") suspend fun allEvents(): List<EventEntity>
+    @Query("SELECT * FROM companion_event_recipients") suspend fun allEventRecipients(): List<EventRecipientEntity>
+    @Query("SELECT * FROM companion_agent_turns") suspend fun allAgentTurns(): List<AgentTurnEntity>
+    @Query("SELECT * FROM companion_action_audit") suspend fun allAudits(): List<ActionAuditEntity>
+    @Query("SELECT * FROM companion_pending_actions") suspend fun allPendingActions(): List<PendingActionEntity>
+    @Query("SELECT * FROM companion_events WHERE id = :eventId") suspend fun event(eventId: String): EventEntity?
+    @Query("SELECT * FROM companion_events WHERE occurredAt >= :since ORDER BY occurredAt DESC LIMIT :limit") suspend fun recentEvents(since: Long, limit: Int): List<EventEntity>
+    @Query("SELECT * FROM companion_event_recipients WHERE eventId = :eventId AND (state = 'NEW' OR (state = 'DEFERRED' AND deferUntil <= :now))") suspend fun pendingRecipients(eventId: String, now: Long): List<EventRecipientEntity>
+    @Query("SELECT COUNT(*) FROM companion_event_recipients WHERE eventId = :eventId AND state IN ('NEW', 'DEFERRED')") suspend fun unresolvedRecipientCount(eventId: String): Int
+    @Query("SELECT MIN(deferUntil) FROM companion_event_recipients WHERE eventId = :eventId AND state = 'DEFERRED'") suspend fun nextRecipientDue(eventId: String): Long?
+    @Query("UPDATE companion_event_recipients SET state = :state, deferUntil = :deferUntil, completedAt = :completedAt WHERE eventId = :eventId AND characterId = :characterId") suspend fun updateRecipientState(eventId: String, characterId: String, state: EventState, deferUntil: Long?, completedAt: Long?)
+    @Query("UPDATE companion_event_recipients SET state = 'CONSUMED', deferUntil = NULL, completedAt = :clearedAt WHERE characterId IN (SELECT characterId FROM companion_thread_participants WHERE threadId = :threadId) AND state IN ('NEW', 'DEFERRED')") suspend fun consumePendingRecipientsForThread(threadId: String, clearedAt: Long)
+    @Query("UPDATE companion_events SET state = :state, deferUntil = :deferUntil, consumedAt = :consumedAt WHERE id = :eventId") suspend fun updateEventState(eventId: String, state: EventState, deferUntil: Long?, consumedAt: Long?)
+    @Query("UPDATE companion_events SET summary = 'Event content discarded after context window' WHERE occurredAt < :before") suspend fun redactHistoricalEvents(before: Long)
+    @Query("SELECT * FROM companion_model_profiles WHERE kind = :kind LIMIT 1") suspend fun modelProfile(kind: String): ModelProfileEntity?
+    @Query("SELECT * FROM companion_model_profiles ORDER BY kind") fun observeModelProfiles(): Flow<List<ModelProfileEntity>>
+    @Query("SELECT * FROM companion_model_profiles ORDER BY kind") suspend fun allModelProfiles(): List<ModelProfileEntity>
+    @Query("SELECT * FROM companion_image_api_pool ORDER BY createdAt ASC") fun observeImageApiPool(): Flow<List<ImageApiPoolEntity>>
+    @Query("SELECT * FROM companion_image_api_pool ORDER BY createdAt ASC") suspend fun allImageApiPool(): List<ImageApiPoolEntity>
+    @Query("SELECT * FROM companion_image_api_pool WHERE enabled = 1 ORDER BY createdAt ASC") suspend fun enabledImageApiPool(): List<ImageApiPoolEntity>
+    @Query("SELECT * FROM companion_snapshot_manifests ORDER BY createdAt DESC") suspend fun allSnapshotManifests(): List<SnapshotManifestEntity>
+    @Query("SELECT * FROM companion_timeline_events WHERE threadId = :threadId ORDER BY occurredAt DESC LIMIT :limit") suspend fun recentTimelineForThread(threadId: String, limit: Int): List<TimelineEventEntity>
+    @Query("SELECT * FROM companion_timeline_events WHERE characterId = :characterId ORDER BY occurredAt DESC LIMIT :limit") suspend fun recentTimelineForCharacter(characterId: String, limit: Int): List<TimelineEventEntity>
+    @Query("SELECT * FROM companion_timeline_events") suspend fun allTimelineEvents(): List<TimelineEventEntity>
+    @Query("SELECT * FROM companion_world_states WHERE characterId = :characterId AND scope = :scope ORDER BY updatedAt DESC") suspend fun worldStates(characterId: String, scope: String): List<WorldStateEntity>
+
+    @Query("SELECT * FROM companion_world_states WHERE threadId = :threadId AND scope = :scope ORDER BY updatedAt DESC") suspend fun worldStatesByThread(threadId: String, scope: String): List<WorldStateEntity>
+
+    @Query("SELECT * FROM companion_world_states WHERE threadId = :threadId AND scope = :scope ORDER BY updatedAt DESC") fun observeStealthStates(threadId: String, scope: String): Flow<List<WorldStateEntity>>
+    @Query("SELECT * FROM companion_world_states ORDER BY updatedAt DESC") fun observeWorldStates(): Flow<List<WorldStateEntity>>
+    @Query("SELECT * FROM companion_world_states") suspend fun allWorldStates(): List<WorldStateEntity>
+    @Query("SELECT * FROM companion_semantic_memories WHERE characterId = :characterId AND retrievable = 1 ORDER BY importance DESC, updatedAt DESC LIMIT :limit") suspend fun retrievableSemanticMemories(characterId: String, limit: Int): List<SemanticMemoryEntity>
+    @Query("SELECT * FROM companion_semantic_memories WHERE characterId = :characterId AND retrievable = 1") suspend fun allRetrievableSemanticMemories(characterId: String): List<SemanticMemoryEntity>
+    @Query("SELECT * FROM companion_semantic_memories WHERE characterId = :characterId AND retrievable = 1 AND updatedAt >= :since") suspend fun allRetrievableSemanticMemoriesSince(characterId: String, since: Long): List<SemanticMemoryEntity>
+    @Query("SELECT * FROM companion_semantic_memories") suspend fun allSemanticMemories(): List<SemanticMemoryEntity>
+    @Query("SELECT * FROM companion_durable_tasks WHERE state IN ('QUEUED', 'RUNNING', 'RETRY') AND nextRunAt <= :now ORDER BY nextRunAt ASC") suspend fun dueDurableTasks(now: Long): List<DurableTaskEntity>
+    @Query("SELECT * FROM companion_durable_tasks WHERE type = :type ORDER BY nextRunAt DESC LIMIT 1") suspend fun durableTaskByType(type: String): DurableTaskEntity?
+    @Query("SELECT * FROM companion_durable_tasks") suspend fun allDurableTasks(): List<DurableTaskEntity>
+    @Query("SELECT * FROM companion_agent_runs") suspend fun allAgentRuns(): List<AgentRunEntity>
+    @Query("SELECT * FROM companion_family_group_facts ORDER BY createdAt DESC") fun observeFamilyGroupFacts(): Flow<List<FamilyGroupFactEntity>>
+    @Query("SELECT * FROM companion_family_group_facts ORDER BY createdAt DESC") suspend fun allFamilyGroupFacts(): List<FamilyGroupFactEntity>
+    @Query("SELECT * FROM companion_family_group_facts WHERE groupThreadId = :threadId AND allowedInGroup = 1 AND (expiresAt IS NULL OR expiresAt >= :now) ORDER BY createdAt DESC LIMIT :limit") suspend fun activeFamilyGroupFacts(threadId: String, now: Long, limit: Int): List<FamilyGroupFactEntity>
+    @Query("SELECT * FROM companion_family_group_facts WHERE groupThreadId IN (SELECT threadId FROM companion_thread_participants WHERE characterId = :characterId) AND allowedInGroup = 1 AND (expiresAt IS NULL OR expiresAt >= :now) ORDER BY createdAt DESC LIMIT :limit") suspend fun activeFamilyGroupFactsForCharacter(characterId: String, now: Long, limit: Int): List<FamilyGroupFactEntity>
+    @Query("SELECT * FROM companion_group_member_states") fun observeGroupMemberStates(): Flow<List<GroupMemberStateEntity>>
+    @Query("SELECT * FROM companion_group_member_states") suspend fun allGroupMemberStates(): List<GroupMemberStateEntity>
+    @Query("SELECT * FROM companion_group_member_states WHERE groupThreadId = :threadId ORDER BY lastSpokeAt ASC") suspend fun groupMemberStates(threadId: String): List<GroupMemberStateEntity>
+    @Query("SELECT * FROM companion_group_settings") fun observeGroupSettings(): Flow<List<GroupSettingsEntity>>
+    @Query("SELECT * FROM companion_group_settings") suspend fun allGroupSettings(): List<GroupSettingsEntity>
+    @Query("SELECT * FROM companion_group_settings WHERE groupThreadId = :threadId") suspend fun groupSettings(threadId: String): GroupSettingsEntity?
+    @Query("SELECT messageId FROM companion_group_private_followup_uses WHERE groupThreadId = :threadId AND characterId = :characterId") suspend fun usedGroupPrivateFollowUpMessageIds(threadId: String, characterId: String): List<String>
+    @Query("SELECT * FROM companion_group_private_followup_uses") suspend fun allGroupPrivateFollowUpUses(): List<GroupPrivateFollowUpUseEntity>
+    @Query("SELECT * FROM companion_group_derived_memory_links") suspend fun allGroupDerivedMemoryLinks(): List<GroupDerivedMemoryLinkEntity>
+    @Query("SELECT * FROM companion_memories WHERE characterId = :characterId AND blockedFromMention = 0 ORDER BY updatedAt DESC LIMIT :limit") suspend fun characterMemories(characterId: String, limit: Int): List<MemoryEntity>
+    @Query("SELECT * FROM companion_memories WHERE characterId = :characterId AND blockedFromMention = 0 AND kind != 'EVENT' ORDER BY updatedAt DESC LIMIT :limit") suspend fun trustedCharacterMemories(characterId: String, limit: Int): List<MemoryEntity>
+    @Query("UPDATE companion_threads SET updatedAt = :updatedAt WHERE id = :threadId") suspend fun touchThread(threadId: String, updatedAt: Long)
+    @Query("UPDATE companion_threads SET contextVersion = contextVersion + 1, memorySince = :updatedAt, updatedAt = :updatedAt WHERE id = :threadId") suspend fun resetThreadContext(threadId: String, updatedAt: Long)
+    @Query("UPDATE companion_messages SET body = :body WHERE id = :messageId") suspend fun updateMessageBody(messageId: String, body: String)
+    @Query("UPDATE companion_messages SET body = :body, imageUri = :imageUri WHERE id = :messageId") suspend fun updateMessageContent(messageId: String, body: String, imageUri: String?)
+    @Query("DELETE FROM companion_messages WHERE id = :messageId") suspend fun deleteMessage(messageId: String)
+    @Query("UPDATE companion_messages SET body = REPLACE(body, 'null', '') WHERE body LIKE 'null%'") suspend fun removeMalformedStreamTokens()
+    @Query("UPDATE companion_messages SET readAt = :readAt WHERE threadId = :threadId AND fromUser = 0 AND readAt IS NULL") suspend fun markCompanionMessagesRead(threadId: String, readAt: Long)
+    @Query("SELECT * FROM companion_pending_actions WHERE state = 'PENDING' ORDER BY createdAt ASC") fun observePendingActions(): Flow<List<PendingActionEntity>>
+    @Query("SELECT * FROM companion_pending_actions WHERE threadId = :threadId ORDER BY createdAt DESC") suspend fun pendingActionsForThread(threadId: String): List<PendingActionEntity>
+    @Query("SELECT * FROM companion_pending_actions WHERE capabilityId IN ('companion.generate_image', 'companion.propose_image', 'companion.propose_private_image', 'companion.generate_moment_image', 'companion.peek_image', 'companion.share_life_moment') ORDER BY createdAt DESC") fun observeImageGenerationActions(): Flow<List<PendingActionEntity>>
+    @Query("SELECT * FROM companion_pending_actions WHERE id = :actionId") suspend fun pendingAction(actionId: String): PendingActionEntity?
+    @Query("UPDATE companion_pending_actions SET state = :state, resolvedAt = NULL, resultSummary = NULL WHERE id = :actionId") suspend fun markPendingActionRunning(actionId: String, state: String)
+    @Query("UPDATE companion_pending_actions SET argumentsJson = :argumentsJson WHERE id = :actionId") suspend fun updatePendingActionArguments(actionId: String, argumentsJson: String)
+    @Query("UPDATE companion_pending_actions SET state = :state, resolvedAt = :resolvedAt, resultSummary = :resultSummary WHERE id = :actionId") suspend fun resolvePendingAction(actionId: String, state: String, resolvedAt: Long, resultSummary: String)
+    @Query("DELETE FROM companion_threads WHERE id = :threadId") suspend fun deleteThread(threadId: String)
+    @Query("DELETE FROM companion_thread_participants WHERE threadId = :threadId") suspend fun deleteParticipants(threadId: String)
+    @Query("DELETE FROM companion_thread_participants WHERE characterId = :characterId") suspend fun deleteCharacterParticipants(characterId: String)
+    @Query("DELETE FROM companion_messages WHERE threadId = :threadId") suspend fun deleteMessages(threadId: String)
+    @Query("DELETE FROM companion_memories WHERE threadId = :threadId") suspend fun deleteThreadMemories(threadId: String)
+    @Query("DELETE FROM companion_diary_photos WHERE threadId = :threadId") suspend fun deleteThreadDiaryPhotos(threadId: String)
+    @Query("DELETE FROM companion_memories WHERE characterId = :characterId") suspend fun deleteCharacterMemories(characterId: String)
+    @Query("DELETE FROM companion_diary_photos WHERE characterId = :characterId") suspend fun deleteCharacterDiaryPhotos(characterId: String)
+
+    @Query("DELETE FROM companion_diary_photos WHERE imageUri = :uri") suspend fun deleteDiaryPhotosByUri(uri: String)
+    @Query("DELETE FROM companion_moment_media WHERE postId = :postId") suspend fun deleteMomentMedia(postId: String)
+    @Query("DELETE FROM companion_moment_reactions WHERE postId = :postId") suspend fun deleteMomentReactions(postId: String)
+    @Query("DELETE FROM companion_moment_comments WHERE postId = :postId") suspend fun deleteMomentComments(postId: String)
+    @Query("DELETE FROM companion_moment_posts WHERE id = :postId") suspend fun deleteMomentPost(postId: String)
+    @Query("DELETE FROM companion_moment_reactions WHERE postId = :postId AND actorType = :actorType AND actorId = :actorId AND kind = 'LIKE'") suspend fun deleteMomentLike(postId: String, actorType: String, actorId: String)
+    @Query("DELETE FROM companion_agent_turns WHERE threadId = :threadId") suspend fun deleteAgentTurnsForThread(threadId: String)
+    @Query("DELETE FROM companion_pending_actions WHERE threadId = :threadId") suspend fun deletePendingActionsForThread(threadId: String)
+
+    @Query("SELECT * FROM companion_pending_actions WHERE resultSummary = :uri") suspend fun pendingActionsByResult(uri: String): List<com.aster.companion.data.PendingActionEntity>
+
+    @Query("DELETE FROM companion_pending_actions WHERE id = :actionId") suspend fun deletePendingAction(actionId: String)
+    @Query("DELETE FROM companion_event_recipients WHERE characterId = :characterId") suspend fun deleteEventRecipientsForCharacter(characterId: String)
+    @Query("DELETE FROM companion_memories WHERE id = :memoryId") suspend fun deleteMemory(memoryId: String)
+    @Query("DELETE FROM companion_image_api_pool WHERE id = :entryId") suspend fun deleteImageApiPool(entryId: String)
+    @Query("DELETE FROM companion_snapshot_manifests WHERE id = :snapshotId") suspend fun deleteSnapshotManifest(snapshotId: String)
+    @Query("DELETE FROM companion_timeline_events WHERE threadId = :threadId") suspend fun deleteThreadTimeline(threadId: String)
+    @Query("DELETE FROM companion_timeline_events WHERE id LIKE :idPrefix || '%'") suspend fun deleteTimelineEventsWithIdPrefix(idPrefix: String)
+    @Query("DELETE FROM companion_semantic_memories WHERE threadId = :threadId") suspend fun deleteThreadSemanticMemories(threadId: String)
+    @Query("DELETE FROM companion_durable_tasks WHERE threadId = :threadId") suspend fun deleteThreadDurableTasks(threadId: String)
+    @Query("DELETE FROM companion_agent_runs WHERE threadId = :threadId") suspend fun deleteThreadAgentRuns(threadId: String)
+    @Query("DELETE FROM companion_world_states WHERE threadId = :threadId AND scope = 'SHARED'") suspend fun deleteThreadSharedWorld(threadId: String)
+    @Query("DELETE FROM companion_world_states WHERE threadId = :threadId AND scope NOT IN ('STEALTH_MODE', 'FAMILY_GUIDE')") suspend fun deleteThreadWorldStates(threadId: String)
+    @Query("DELETE FROM companion_thread_summaries WHERE threadId = :threadId") suspend fun deleteThreadSummaries(threadId: String)
+    @Query("DELETE FROM companion_timeline_events WHERE characterId = :characterId") suspend fun deleteCharacterTimeline(characterId: String)
+    @Query("DELETE FROM companion_semantic_memories WHERE characterId = :characterId") suspend fun deleteCharacterSemanticMemories(characterId: String)
+    @Query("DELETE FROM companion_durable_tasks WHERE characterId = :characterId") suspend fun deleteCharacterDurableTasks(characterId: String)
+    @Query("DELETE FROM companion_agent_runs WHERE characterId = :characterId") suspend fun deleteCharacterAgentRuns(characterId: String)
+    @Query("DELETE FROM companion_world_states WHERE characterId = :characterId") suspend fun deleteCharacterWorldStates(characterId: String)
+    @Query("DELETE FROM companion_world_states WHERE characterId = :characterId AND scope IN ('SYNCED_CONTEXT', 'LAST_PHOTO', 'LAST_SCENE', 'PRIVATE', 'SHARED')") suspend fun deleteCharacterChatDerivedWorldStates(characterId: String)
+
+    // ---- 「清除聊天记录」用：把角色的状态类数据重置为全新状态（角色本体/对话/关系不动）----
+
+    /** 生命状态（能量/压力/孤独/社交需求/隐藏目标）。 */
+    @Query("DELETE FROM companion_character_life_state WHERE characterId = :characterId") suspend fun deleteCharacterLifeState(characterId: String)
+
+    /** 人格推演结果。 */
+    @Query("DELETE FROM companion_character_personality WHERE characterId = :characterId") suspend fun deleteCharacterPersonality(characterId: String)
+
+    /** 当前阶段目标。 */
+    @Query("DELETE FROM companion_character_goals WHERE characterId = :characterId") suspend fun deleteCharacterGoals(characterId: String)
+
+    /** 决策链心理摘要。 */
+    @Query("DELETE FROM companion_decision_chains WHERE characterId = :characterId") suspend fun deleteCharacterDecisionChains(characterId: String)
+
+    /**
+     * 该角色参与过的共同活动。`companion_activities` 没有 characterId 列，参与者存在
+     * `participantsJson`（`{"character_ids":[...]}`），所以按 JSON 里带引号的 id 精确匹配。
+     */
+    @Query("DELETE FROM companion_activities WHERE participantsJson LIKE '%\"' || :characterId || '\"%'") suspend fun deleteCharacterActivities(characterId: String)
+
+    /** 该角色发出或收到的交互请求。 */
+    @Query("DELETE FROM companion_interaction_requests WHERE senderCharacterId = :characterId OR receiverCharacterId = :characterId") suspend fun deleteCharacterInteractionRequests(characterId: String)
+
+    /** 该角色在各群里的情绪/注意力状态。 */
+    @Query("DELETE FROM companion_group_member_states WHERE characterId = :characterId") suspend fun deleteCharacterGroupMemberStates(characterId: String)
+
+    /**
+     * 含该角色的未来时间线。`companion_future_timelines` 没有 characterId 列，
+     * 事件列表存在 `eventsJson`（事件带 `"participants":[...]`），同样按带引号的 id 匹配。
+     */
+    @Query("DELETE FROM companion_future_timelines WHERE eventsJson LIKE '%\"' || :characterId || '\"%'") suspend fun deleteCharacterFutureTimelines(characterId: String)
+
+    /** 她朋友圈帖子的媒体/点赞/评论（按 postId 关联），必须先于帖子本身删。 */
+    @Query("DELETE FROM companion_moment_media WHERE postId IN (SELECT id FROM companion_moment_posts WHERE authorCharacterId = :characterId)") suspend fun deleteCharacterMomentMedia(characterId: String)
+    @Query("DELETE FROM companion_moment_reactions WHERE postId IN (SELECT id FROM companion_moment_posts WHERE authorCharacterId = :characterId)") suspend fun deleteCharacterMomentReactions(characterId: String)
+    @Query("DELETE FROM companion_moment_comments WHERE postId IN (SELECT id FROM companion_moment_posts WHERE authorCharacterId = :characterId)") suspend fun deleteCharacterMomentComments(characterId: String)
+    @Query("DELETE FROM companion_moment_posts WHERE authorCharacterId = :characterId") suspend fun deleteCharacterMomentPosts(characterId: String)
+
+    /** 她的此刻状态：直接删行，下次世界推演会按人格/作息重新初始化。 */
+    @Query("DELETE FROM companion_character_living_states WHERE characterId = :characterId") suspend fun deleteCharacterLivingState(characterId: String)
+
+    /**
+     * 清空聊天后：把该角色收到过的事件**内容**抹掉并标记已处理。
+     * 事件是按对话产生的，而生活模拟（WorldBatchSimulationCoordinator）每轮都用
+     * `pendingEvents()` 推演她的状态——不清掉的话，她清空后仍会"依稀记得"那些事。
+     */
+    @Query(
+        "UPDATE companion_events SET summary = :placeholder, state = 'CONSUMED', consumedAt = :clearedAt " +
+            "WHERE id IN (SELECT eventId FROM companion_event_recipients WHERE characterId = :characterId)"
+    )
+    suspend fun redactEventsForCharacter(characterId: String, clearedAt: Long, placeholder: String)
+
+    /**
+     * 清空聊天后：把「此刻在做什么 / 心情」回退成空白（UI 会显示默认的「安静待着 · 心情平静」）。
+     * 作息表与睡眠时间保留——那是她的日常，不是这段对话的产物。
+     */
+    @Query(
+        "UPDATE companion_character_living_states SET currentActivity = '', mood = '', activityStartedAt = :now, " +
+            "locationId = 'home', sleepUntil = NULL WHERE characterId = :characterId"
+    )
+    suspend fun resetCharacterCurrentActivity(characterId: String, now: Long)
+    @Query("DELETE FROM companion_characters WHERE id = :characterId") suspend fun deleteCharacter(characterId: String)
+    @Query("DELETE FROM companion_messages") suspend fun deleteAllMessages()
+    @Query("DELETE FROM companion_thread_participants WHERE characterId IN ('xue', 'yuan')") suspend fun deleteDevelopmentSeedParticipants()
+    @Query("DELETE FROM companion_characters WHERE id IN ('xue', 'yuan')") suspend fun deleteDevelopmentSeedCharacters()
+    @Query("DELETE FROM companion_threads WHERE id NOT IN (SELECT DISTINCT threadId FROM companion_thread_participants)") suspend fun deleteOrphanThreads()
+    @Query("DELETE FROM companion_family_group_facts WHERE id = :factId") suspend fun deleteFamilyGroupFact(factId: String)
+    @Query("DELETE FROM companion_family_group_facts WHERE groupThreadId = :threadId") suspend fun deleteFamilyGroupFacts(threadId: String)
+    @Query("DELETE FROM companion_group_member_states WHERE groupThreadId = :threadId") suspend fun deleteGroupMemberStates(threadId: String)
+    @Query("DELETE FROM companion_group_member_states WHERE groupThreadId = :threadId AND characterId = :characterId") suspend fun deleteGroupMemberState(threadId: String, characterId: String)
+    @Query("DELETE FROM companion_group_settings WHERE groupThreadId = :threadId") suspend fun deleteGroupSettings(threadId: String)
+    @Query("DELETE FROM companion_group_private_followup_uses WHERE groupThreadId = :threadId") suspend fun deleteGroupPrivateFollowUpUses(threadId: String)
+    @Query("DELETE FROM companion_group_private_followup_uses WHERE characterId = :characterId") suspend fun deleteGroupPrivateFollowUpUsesForCharacter(characterId: String)
+    @Query("DELETE FROM companion_semantic_memories WHERE id IN (SELECT semanticMemoryId FROM companion_group_derived_memory_links WHERE factId IN (SELECT id FROM companion_family_group_facts WHERE groupThreadId = :threadId))") suspend fun deleteGroupDerivedSemanticMemories(threadId: String)
+    @Query("DELETE FROM companion_group_derived_memory_links WHERE factId IN (SELECT id FROM companion_family_group_facts WHERE groupThreadId = :threadId)") suspend fun deleteGroupDerivedMemoryLinks(threadId: String)
+    @Query("DELETE FROM companion_semantic_memories WHERE id IN (SELECT semanticMemoryId FROM companion_group_derived_memory_links WHERE characterId = :characterId AND factId IN (SELECT id FROM companion_family_group_facts WHERE groupThreadId = :threadId))") suspend fun deleteGroupDerivedSemanticMemoriesForMember(threadId: String, characterId: String)
+    @Query("DELETE FROM companion_group_derived_memory_links WHERE characterId = :characterId AND factId IN (SELECT id FROM companion_family_group_facts WHERE groupThreadId = :threadId)") suspend fun deleteGroupDerivedMemoryLinksForMember(threadId: String, characterId: String)
+
+    @Transaction
+    suspend fun deleteThreadAndAssociatedData(threadId: String) {
+        deleteGroupDerivedSemanticMemories(threadId)
+        deleteGroupDerivedMemoryLinks(threadId)
+        deleteFamilyGroupFacts(threadId)
+        deleteGroupMemberStates(threadId)
+        deleteGroupSettings(threadId)
+        deleteGroupPrivateFollowUpUses(threadId)
+        deleteMessages(threadId)
+        deleteThreadMemories(threadId)
+        deleteThreadDiaryPhotos(threadId)
+        deleteAgentTurnsForThread(threadId)
+        deletePendingActionsForThread(threadId)
+        deleteThreadTimeline(threadId)
+        deleteThreadSemanticMemories(threadId)
+        deleteThreadDurableTasks(threadId)
+        deleteThreadAgentRuns(threadId)
+        deleteThreadSharedWorld(threadId)
+        deleteParticipants(threadId)
+        deleteThread(threadId)
+    }
+
+    @Transaction
+    suspend fun deletePrivateFriendAndAssociatedData(threadId: String, characterId: String?) {
+        deleteThreadAndAssociatedData(threadId)
+        if (characterId != null) {
+            deleteCharacterMemories(characterId)
+            deleteCharacterDiaryPhotos(characterId)
+            deleteEventRecipientsForCharacter(characterId)
+            deleteCharacterTimeline(characterId)
+            deleteCharacterSemanticMemories(characterId)
+            deleteCharacterDurableTasks(characterId)
+            deleteCharacterAgentRuns(characterId)
+            deleteCharacterWorldStates(characterId)
+            deleteGroupPrivateFollowUpUsesForCharacter(characterId)
+            deleteCharacterParticipants(characterId)
+            deleteCharacter(characterId)
+        }
+        deleteOrphanThreads()
+    }
+
+    @Transaction
+    suspend fun clearThreadConversationContext(threadId: String, clearedAt: Long) {
+        deleteGroupDerivedSemanticMemories(threadId)
+        deleteGroupDerivedMemoryLinks(threadId)
+        deleteFamilyGroupFacts(threadId)
+        deleteGroupMemberStates(threadId)
+        deleteGroupPrivateFollowUpUses(threadId)
+        consumePendingRecipientsForThread(threadId, clearedAt)
+        deleteMessages(threadId)
+        deleteThreadMemories(threadId)
+        deleteThreadDiaryPhotos(threadId)
+        deleteAgentTurnsForThread(threadId)
+        deletePendingActionsForThread(threadId)
+        deleteThreadTimeline(threadId)
+        deleteThreadSemanticMemories(threadId)
+        deleteThreadDurableTasks(threadId)
+        deleteThreadAgentRuns(threadId)
+        deleteThreadSharedWorld(threadId)
+        deleteThreadWorldStates(threadId)
+        deleteThreadSummaries(threadId)
+        resetThreadContext(threadId, clearedAt)
+    }
+
+    /**
+     * 「清除聊天记录」：把角色的**状态类**数据一次清成全新状态，不只是「不记得对话」。
+     * 性格推演、自主生活数值、目标、决策链、活动轨迹、互动请求、群内状态、未来时间线、
+     * 朋友圈（含媒体/点赞/评论）、日记照片、世界状态、此刻状态全部归零。
+     *
+     * 刻意不动：`companion_characters`（角色本体）、`companion_messages` / `companion_threads`
+     * （对话本身由 [clearThreadConversationContext] 处理）、`companion_relationships`
+     * （她与其他角色的关系是别的角色的资产）、`companion_family_group_facts`（家庭事实）。
+     */
+    @Transaction
+    suspend fun resetCharacterToFreshState(characterId: String) {
+        deleteCharacterLifeState(characterId)
+        deleteCharacterPersonality(characterId)
+        deleteCharacterGoals(characterId)
+        deleteCharacterDecisionChains(characterId)
+        deleteCharacterActivities(characterId)
+        deleteCharacterInteractionRequests(characterId)
+        deleteCharacterGroupMemberStates(characterId)
+        deleteCharacterFutureTimelines(characterId)
+        // 先删帖子的子行，再删帖子本身。
+        deleteCharacterMomentMedia(characterId)
+        deleteCharacterMomentReactions(characterId)
+        deleteCharacterMomentComments(characterId)
+        deleteCharacterMomentPosts(characterId)
+        deleteCharacterDiaryPhotos(characterId)
+        deleteCharacterWorldStates(characterId)
+        deleteCharacterLivingState(characterId)
+    }
+
+    @Transaction
+    suspend fun deleteMomentPostAndAssociatedData(postId: String) {
+        deleteMomentMedia(postId)
+        deleteMomentReactions(postId)
+        deleteMomentComments(postId)
+        deleteMomentPost(postId)
+    }
+
+    @Transaction
+    suspend fun replaceMomentContent(post: MomentPostEntity, media: List<MomentMediaEntity>) {
+        upsertMomentPost(post)
+        deleteMomentMedia(post.id)
+        for (item in media) upsertMomentMedia(item)
+    }
+
+    @Transaction
+    suspend fun insertGroupPrivateFollowUp(message: MessageEntity, uses: List<GroupPrivateFollowUpUseEntity>) {
+        insertMessage(message)
+        insertGroupPrivateFollowUpUses(uses)
+    }
+
+    @Transaction
+    suspend fun finalizeStreamingMessage(placeholderId: String, message: MessageEntity) {
+        insertMessage(message)
+        deleteMessage(placeholderId)
+    }
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertLivingState(state: CharacterLivingStateEntity)
+    @Query("SELECT * FROM companion_character_living_states WHERE characterId = :characterId")
+    suspend fun livingState(characterId: String): CharacterLivingStateEntity?
+    @Query("SELECT * FROM companion_character_living_states")
+    suspend fun allLivingStates(): List<CharacterLivingStateEntity>
+
+    /** 换机迁移用：自主生活的数值状态（能量/压力/孤独/社交需求/隐藏目标）整表导出。 */
+    @Query("SELECT * FROM companion_character_life_state") suspend fun allLifeStates(): List<CharacterLifeStateEntity>
+
+    /** 换机迁移用：人格权重与核心描述整表导出，否则新机上角色的行为倾向会退回全 50 默认值。 */
+    @Query("SELECT * FROM companion_character_personality") suspend fun allPersonalities(): List<CharacterPersonalityEntity>
+
+    /** 换机迁移用：会话滚动总结整表导出，否则新机上长对话的"更早之前聊过"记忆会丢。 */
+    @Query("SELECT * FROM companion_thread_summaries") suspend fun allThreadSummaries(): List<ThreadSummaryEntity>
+
+    @Query("SELECT * FROM companion_character_living_states")
+    fun observeAllLivingStates(): Flow<List<CharacterLivingStateEntity>>
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertThreadSummary(summary: ThreadSummaryEntity)
+    @Query("SELECT * FROM companion_thread_summaries WHERE threadId = :threadId")
+    suspend fun threadSummary(threadId: String): ThreadSummaryEntity?
+
+    @Query("SELECT * FROM companion_thread_summaries ORDER BY updatedAt DESC") fun observeThreadSummaries(): Flow<List<ThreadSummaryEntity>>
+
+}

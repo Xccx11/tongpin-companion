@@ -1,0 +1,471 @@
+package com.aster.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.outlined.Explore
+import androidx.compose.material.icons.outlined.HourglassBottom
+import androidx.compose.material.icons.outlined.PhoneAndroid
+import androidx.compose.material.icons.outlined.Place
+import androidx.compose.material.icons.outlined.SelfImprovement
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.semantics.Role
+import com.aster.companion.agent.world.WorldSceneAction
+import com.aster.companion.agent.world.WorldSceneCharacter
+import com.aster.companion.agent.world.WorldSceneLocation
+import com.aster.companion.agent.world.WorldSceneProjection
+import com.aster.companion.data.WorldTimelineEventEntity
+import com.aster.ui.theme.AsterColorScheme
+import com.aster.ui.theme.AsterTheme
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.delay
+
+@Composable
+internal fun WorldScenePage(
+    scene: WorldSceneProjection?,
+    invitations: List<WorldTimelineEventEntity>,
+    onRespondToInvitation: (String, Boolean) -> Unit,
+    onAction: (WorldSceneAction, String) -> Unit,
+    onMove: (String) -> Unit,
+    onOpenPhone: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = AsterTheme.colors
+    var showMoveSheet by rememberSaveable { mutableStateOf(false) }
+    var freeAction by rememberSaveable { mutableStateOf("") }
+    var feedback by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(feedback) {
+        if (feedback != null) {
+            delay(1_800L)
+            feedback = null
+        }
+    }
+
+    if (scene == null) {
+        Box(modifier.fillMaxSize().background(colors.bg), contentAlignment = Alignment.Center) {
+            Text("正在进入世界...", color = colors.textMuted, fontSize = 14.sp)
+        }
+        return
+    }
+
+    Column(modifier.fillMaxSize().background(colors.bg)) {
+        Column(
+            Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+        ) {
+            WorldSceneHeader(scene, onOpenPhone, colors)
+            WorldEnvironment(scene, colors)
+            if (invitations.isNotEmpty()) {
+                WorldInvitationSection(scene, invitations, onRespondToInvitation, colors)
+            }
+            WorldCharacterSections(scene, colors)
+            Spacer(Modifier.height(20.dp))
+        }
+        WorldActionPanel(
+            scene = scene,
+            freeAction = freeAction,
+            feedback = feedback,
+            onFreeActionChange = { freeAction = it.take(160) },
+            onMove = { showMoveSheet = true },
+            onAction = { action, label ->
+                onAction(action, label)
+                feedback = label
+            },
+            onSubmitFreeAction = {
+                val detail = freeAction.trim()
+                if (detail.isNotEmpty()) {
+                    onAction(WorldSceneAction.FREE_ACTION, detail)
+                    feedback = detail
+                    freeAction = ""
+                }
+            },
+            colors = colors
+        )
+    }
+
+    if (showMoveSheet) {
+        WorldMoveSheet(
+            locations = scene.nearbyLocations,
+            onMove = { location ->
+                onMove(location.locationId)
+                feedback = "前往${location.name}"
+                showMoveSheet = false
+            },
+            onDismiss = { showMoveSheet = false },
+            colors = colors
+        )
+    }
+}
+
+@Composable
+private fun WorldSceneHeader(
+    scene: WorldSceneProjection,
+    onOpenPhone: () -> Unit,
+    colors: AsterColorScheme
+) {
+    val clock = remember(scene.worldTime) {
+        SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(scene.worldTime))
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(colors.worldSurface)
+            .padding(start = 20.dp, end = 12.dp, top = 24.dp, bottom = 20.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                scene.locationName,
+                color = colors.text,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                "$clock  ${scene.timePhase}",
+                color = colors.worldAccent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+            Text(
+                scene.sceneNarration,
+                color = colors.textMuted,
+                fontSize = 14.sp,
+                lineHeight = 21.sp,
+                modifier = Modifier.padding(top = 14.dp, end = 8.dp)
+            )
+        }
+        IconButton(
+            onClick = onOpenPhone,
+            modifier = Modifier
+                .size(48.dp)
+                .background(colors.surface1, RoundedCornerShape(12.dp))
+        ) {
+            Icon(Icons.Outlined.PhoneAndroid, contentDescription = "打开消息", tint = colors.text)
+        }
+    }
+}
+
+@Composable
+private fun WorldEnvironment(scene: WorldSceneProjection, colors: AsterColorScheme) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        WorldInfoTile(
+            title = "天气",
+            value = scene.weather.ifBlank { "未记录" },
+            modifier = Modifier.weight(1f),
+            colors = colors
+        )
+        WorldInfoTile(
+            title = "环境",
+            value = scene.environment.ifBlank { "安静" },
+            modifier = Modifier.weight(2f),
+            colors = colors
+        )
+    }
+}
+
+@Composable
+private fun WorldInfoTile(title: String, value: String, modifier: Modifier, colors: AsterColorScheme) {
+    Column(
+        modifier
+            .heightIn(min = 64.dp)
+            .background(colors.surface1, RoundedCornerShape(8.dp))
+            .border(1.dp, colors.border, RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        Text(title, color = colors.textMuted, fontSize = 11.sp)
+        Text(
+            value,
+            color = colors.text,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(top = 4.dp),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun WorldInvitationSection(
+    scene: WorldSceneProjection,
+    invitations: List<WorldTimelineEventEntity>,
+    onRespond: (String, Boolean) -> Unit,
+    colors: AsterColorScheme
+) {
+    val locationNames = remember(scene) {
+        (scene.nearbyLocations + WorldSceneLocation(scene.locationId, scene.locationName))
+            .associate { it.locationId to it.name }
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
+        Text("等你回应", color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        invitations.forEach { invitation ->
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp)
+                    .background(colors.worldInvitationSurface, RoundedCornerShape(8.dp))
+                    .border(1.dp, colors.worldInvitationBorder, RoundedCornerShape(8.dp))
+                    .padding(14.dp)
+            ) {
+                Text(invitation.description, color = colors.text, fontSize = 14.sp, lineHeight = 20.sp)
+                Text(
+                    "${locationNames[invitation.locationId] ?: invitation.locationId}  ·  ${invitation.durationMinutes} 分钟  ·  ${worldClock(invitation.scheduledAt)}",
+                    color = colors.textMuted,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+                Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { onRespond(invitation.id, true) },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) { Text("参加") }
+                    OutlinedButton(
+                        onClick = { onRespond(invitation.id, false) },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) { Text("不参加", color = colors.textMuted) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorldCharacterSections(scene: WorldSceneProjection, colors: AsterColorScheme) {
+    val here = scene.characters.filter { it.locationId == scene.locationId }
+    val elsewhere = scene.characters.filterNot { it.locationId == scene.locationId }.groupBy { it.locationName }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp)) {
+        Text("此刻在这里", color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        if (here.isEmpty()) {
+            Text("这里暂时很安静。", color = colors.textMuted, fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp))
+        } else {
+            here.forEach { character -> WorldCharacterRow(character, colors) }
+        }
+        if (elsewhere.isNotEmpty()) {
+            Text("世界里的其他人", color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp))
+            elsewhere.forEach { (locationName, characters) ->
+                Text(locationName, color = colors.worldAccent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 14.dp))
+                characters.forEach { character -> WorldCharacterRow(character, colors) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorldCharacterRow(character: WorldSceneCharacter, colors: AsterColorScheme) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp)
+            .background(colors.surface1, RoundedCornerShape(8.dp))
+            .border(1.dp, colors.border, RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(40.dp).background(colors.worldSurface, CircleShape), contentAlignment = Alignment.Center) {
+            Text(character.name.take(1), color = colors.worldAccent, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        }
+        Column(Modifier.weight(1f).padding(start = 12.dp)) {
+            Text(character.name, color = colors.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                character.activity,
+                color = colors.textMuted,
+                fontSize = 12.sp,
+                lineHeight = 18.sp,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun WorldActionPanel(
+    scene: WorldSceneProjection,
+    freeAction: String,
+    feedback: String?,
+    onFreeActionChange: (String) -> Unit,
+    onMove: () -> Unit,
+    onAction: (WorldSceneAction, String) -> Unit,
+    onSubmitFreeAction: () -> Unit,
+    colors: AsterColorScheme
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(colors.surface1)
+            .border(1.dp, colors.border)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            WorldQuickAction(Icons.Outlined.Place, "移动", WorldSceneAction.MOVE in scene.availableActions, onMove, Modifier.weight(1f), colors)
+            WorldQuickAction(Icons.Outlined.Visibility, "观察", WorldSceneAction.OBSERVE in scene.availableActions, { onAction(WorldSceneAction.OBSERVE, "观察周围") }, Modifier.weight(1f), colors)
+            WorldQuickAction(Icons.Outlined.HourglassBottom, "等待", WorldSceneAction.WAIT in scene.availableActions, { onAction(WorldSceneAction.WAIT, "等待片刻") }, Modifier.weight(1f), colors)
+            WorldQuickAction(Icons.Outlined.SelfImprovement, "休息", WorldSceneAction.REST in scene.availableActions, { onAction(WorldSceneAction.REST, "休息") }, Modifier.weight(1f), colors)
+        }
+        OutlinedTextField(
+            value = freeAction,
+            onValueChange = onFreeActionChange,
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+            placeholder = { Text("自由行动") },
+            singleLine = true,
+                enabled = WorldSceneAction.FREE_ACTION in scene.availableActions,
+            shape = RoundedCornerShape(8.dp),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { onSubmitFreeAction() }),
+            trailingIcon = {
+                IconButton(
+                    onClick = onSubmitFreeAction,
+                    enabled = freeAction.isNotBlank() && WorldSceneAction.FREE_ACTION in scene.availableActions
+                ) {
+                    Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = "执行自由行动", tint = colors.worldAccent)
+                }
+            }
+        )
+        Box(Modifier.fillMaxWidth().height(20.dp), contentAlignment = Alignment.BottomStart) {
+            feedback?.let {
+                Text(it, color = colors.worldAccent, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorldQuickAction(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier,
+    colors: AsterColorScheme
+) {
+    Column(
+        modifier
+            .height(64.dp)
+            .background(if (enabled) colors.worldSurface else colors.surface2, RoundedCornerShape(8.dp))
+            .clickable(
+                enabled = enabled,
+                role = Role.Button,
+                onClickLabel = label,
+                onClick = onClick
+            ),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(icon, contentDescription = null, tint = if (enabled) colors.worldAccent else colors.textSubtle, modifier = Modifier.size(21.dp))
+        Text(label, color = if (enabled) colors.text else colors.textSubtle, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WorldMoveSheet(
+    locations: List<WorldSceneLocation>,
+    onMove: (WorldSceneLocation) -> Unit,
+    onDismiss: () -> Unit,
+    colors: AsterColorScheme
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = colors.surface1,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+            Text("去哪里", color = colors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            if (locations.isEmpty()) {
+                Text("暂时没有可前往的地点。", color = colors.textMuted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 20.dp))
+            } else {
+                locations.forEach { location ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 56.dp)
+                            .padding(top = 8.dp)
+                            .background(colors.worldSurface, RoundedCornerShape(8.dp))
+                            .clickable(
+                                role = Role.Button,
+                                onClickLabel = "前往${location.name}",
+                                onClick = { onMove(location) }
+                            )
+                            .padding(horizontal = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Outlined.Explore, contentDescription = null, tint = colors.worldAccent)
+                        Text(location.name, color = colors.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 12.dp))
+                    }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+private fun worldClock(timestamp: Long): String =
+    SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(timestamp))
+
+private val AsterColorScheme.worldSurface: Color
+    get() = if (isDark) Color(0xFF1F2A24) else Color(0xFFF0F5F1)
+
+private val AsterColorScheme.worldAccent: Color
+    get() = if (isDark) Color(0xFF9BC9AC) else Color(0xFF356A4D)
+
+private val AsterColorScheme.worldInvitationSurface: Color
+    get() = if (isDark) Color(0xFF30272A) else Color(0xFFFFF1F3)
+
+private val AsterColorScheme.worldInvitationBorder: Color
+    get() = if (isDark) Color(0xFF684751) else Color(0xFFE5BEC6)

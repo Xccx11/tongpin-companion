@@ -1,0 +1,65 @@
+package com.aster.di
+
+import android.content.Context
+import androidx.room.Room
+import com.aster.companion.data.CompanionDao
+import com.aster.companion.data.CompanionDatabase
+import com.aster.companion.data.CompanionDatabaseRecoveryGate
+import com.aster.companion.data.DatabaseKeyProvider
+import dagger.Module
+import dagger.Provides
+import dagger.hilt.InstallIn
+import dagger.hilt.android.qualifiers.ApplicationContext
+import dagger.hilt.components.SingletonComponent
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Dispatcher
+import okhttp3.logging.HttpLoggingInterceptor
+import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
+import java.util.concurrent.TimeUnit
+import javax.inject.Singleton
+
+@Module
+@InstallIn(SingletonComponent::class)
+object AppModule {
+
+    @Provides
+    @Singleton
+    fun provideOkHttpClient(): OkHttpClient {
+        val logging = HttpLoggingInterceptor().apply {
+            level = HttpLoggingInterceptor.Level.BASIC
+        }
+        // Conversation, planning and proactive work can overlap. Avoid OkHttp's default
+        // five-request per-host ceiling while keeping a bounded mobile networking budget.
+        val dispatcher = Dispatcher().apply {
+            maxRequests = 64
+            maxRequestsPerHost = 48
+        }
+
+        return OkHttpClient.Builder()
+            .dispatcher(dispatcher)
+            .addInterceptor(logging)
+            .connectTimeout(30, TimeUnit.SECONDS)
+            // 对话要能等网关"从出图切回聊天"：切换要装卸 12B 模型，本机实测可到 1～3 分钟。
+            // 60 秒会让请求在切换期间直接超时（表现就是"不回复"），给到 300 秒。
+            .readTimeout(300, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            // HTTP/1.1 avoids provider-side HTTP/2 upload resets.
+            .protocols(listOf(Protocol.HTTP_1_1))
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+
+    @Provides
+    @Singleton
+    fun provideCompanionDatabase(@ApplicationContext context: Context, recoveryGate: CompanionDatabaseRecoveryGate): CompanionDatabase {
+        return Room.databaseBuilder(context, CompanionDatabase::class.java, recoveryGate.databaseName)
+            .openHelperFactory(SupportOpenHelperFactory(DatabaseKeyProvider(context, recoveryGate.keyPreferenceName).passphrase()))
+            .addMigrations(CompanionDatabase.MIGRATION_1_2, CompanionDatabase.MIGRATION_2_3, CompanionDatabase.MIGRATION_3_4, CompanionDatabase.MIGRATION_4_5, CompanionDatabase.MIGRATION_5_6, CompanionDatabase.MIGRATION_6_7, CompanionDatabase.MIGRATION_7_8, CompanionDatabase.MIGRATION_8_9, CompanionDatabase.MIGRATION_9_10, CompanionDatabase.MIGRATION_10_11, CompanionDatabase.MIGRATION_11_12, CompanionDatabase.MIGRATION_12_13, CompanionDatabase.MIGRATION_13_14, CompanionDatabase.MIGRATION_14_15, CompanionDatabase.MIGRATION_15_16, CompanionDatabase.MIGRATION_16_17, CompanionDatabase.MIGRATION_17_18, CompanionDatabase.MIGRATION_18_19, CompanionDatabase.MIGRATION_19_20, CompanionDatabase.MIGRATION_20_21, CompanionDatabase.MIGRATION_21_22, CompanionDatabase.MIGRATION_22_23, CompanionDatabase.MIGRATION_23_24, CompanionDatabase.MIGRATION_24_25, CompanionDatabase.MIGRATION_25_26, CompanionDatabase.MIGRATION_26_27, CompanionDatabase.MIGRATION_27_28, CompanionDatabase.MIGRATION_28_29, CompanionDatabase.MIGRATION_29_30)
+            .build()
+    }
+
+    @Provides
+    @Singleton
+    fun provideCompanionDao(database: CompanionDatabase): CompanionDao = database.companionDao()
+}

@@ -1,0 +1,16 @@
+package com.aster.companion.agent
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
+object GroupReplySelectionParser {
+    fun parse(raw: String, participants: Set<String>): List<String> = runCatching {
+        Json.parseToJsonElement(raw).jsonObject["speaker_ids"]!!.jsonArray
+            .map { it.jsonPrimitive.content }
+            .filter { it in participants }
+            .distinct()
+            .take(2)
+    }.getOrDefault(emptyList())
+}

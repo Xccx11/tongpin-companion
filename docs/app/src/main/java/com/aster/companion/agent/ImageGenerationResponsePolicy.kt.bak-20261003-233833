@@ -1,0 +1,22 @@
+package com.aster.companion.agent
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
+/** Decodes the standard Images response without treating a JSON null URL as a real URL. */
+object ImageGenerationResponsePolicy {
+    private val json = Json { ignoreUnknownKeys = true }
+
+    fun imageReference(body: String): String {
+        val item = json.parseToJsonElement(body).jsonObject["data"]?.jsonArray?.firstOrNull()?.jsonObject
+            ?: error("图像供应商没有返回图片数据")
+        item["url"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotBlank)?.let { return it }
+        item["b64_json"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotBlank)?.let {
+            return "data:image/png;base64,$it"
+        }
+        error("图像供应商没有返回可显示的图片")
+    }
+}

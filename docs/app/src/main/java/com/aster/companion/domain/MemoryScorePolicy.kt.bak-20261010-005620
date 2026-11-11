@@ -1,0 +1,92 @@
+package com.aster.companion.domain
+
+/**
+ * L2 事实的检索打分：把**相似度 / 重要度 / 新近度**三样合成一个分数。
+ *
+ * ## 它解决什么
+ *
+ * 以前检索排序是两条互不相干的规则：
+ *
+ * - 无向量分支：`关键词命中 → 重要度 → 更新时间`，**三级字典序**——只要重要度差一级，
+ *   时间就完全不起作用（昨天刚说的事会输给三个月前的一件"更重要"的事）；
+ * - 向量分支：**纯余弦降序**，重要度和时间一概不看——于是"碰巧语义相近的琐事"会压过
+ *   "她昨天刚说的要紧事"。
+ *
+ * 现在两处都走这一个打分：相似度是主信号（权重远大于另两项，所以不会把命中翻掉），
+ * 同档之内再由重要度和新近度决定先后。
+ *
+ * ## 为什么没有 confidence
+ *
+ * 这套打分的原型里还有一维 confidence（这条事实有多可信）。本项目**做不了**：
+ * `companion_memories` 表既没有 importance 列也没有 confidence 列（重要度是按 kind 现推的，
+ * 见 `MemoryBudgetPolicy.importanceOf`）。要真的存 confidence 就得加字段、走一次 DB 迁移，
+ * 而这一阶段的硬目标是**零迁移**——所以这一维**刻意不做**，而不是用一个假的代理值糊过去。
+ *
+ * 纯计算：不读时钟（`now` 由调用方传）、不碰数据库。
+ */
+object MemoryScorePolicy {
+
+    /**
+     * 相似度权重。刻意**大于**另两项之和（0.35 + 0.25 = 0.6）：
+     * "这一轮真的聊到了它"是一票否决级别的主信号，不能被重要度/新近度翻盘。
+     */
+    const val WEIGHT_SIMILARITY = 1.0
+    const val WEIGHT_IMPORTANCE = 0.35
+    const val WEIGHT_RECENCY = 0.25
+
+    /** 重要度上限（与 `MemoryBudgetPolicy.importanceOf` 的返回值域一致：0..3）。 */
+    const val MAX_IMPORTANCE = 3
+
+    /** 新近度半衰期：7 天前的事，这一维权重减半。 */
+    const val RECENCY_HALF_LIFE_MS = 7L * 24 * 60 * 60 * 1000
+
+    /** 没有相似度可言时的取值（关键词没命中）。 */
+    const val NO_SIMILARITY = 0.0
+
+    data class Components(
+        val similarity: Double,
+        val importance: Double,
+        val recency: Double
+    ) {
+        val total: Double
+            get() = similarity * WEIGHT_SIMILARITY +
+                importance * WEIGHT_IMPORTANCE +
+                recency * WEIGHT_RECENCY
+    }
+
+    /** 重要度归一化到 0..1；越界夹取（kind 推导出的值只可能是 0..3，这里是防御）。 */
+    fun importanceOf(importance: Int): Double =
+        importance.coerceIn(0, MAX_IMPORTANCE).toDouble() / MAX_IMPORTANCE
+
+    /**
+     * 新近度：`0.5 ^ (age / 半衰期)`，刚发生是 1.0，半衰期后 0.5，两周后 0.25。
+     *
+     * 时钟回拨（[ageMs] 为负）按"刚发生"算，不让它变成大于 1 的奖励。
+     */
+    fun recencyOf(ageMs: Long): Double {
+        val age = ageMs.coerceAtLeast(0L)
+        return Math.pow(0.5, age.toDouble() / RECENCY_HALF_LIFE_MS)
+    }
+
+    /**
+     * 余弦相似度 → 打分用的相似度。
+     *
+     * - 不可比（null）→ [NO_SIMILARITY]；
+     * - 负数（语义相反）**夹到 0**：语义相反不该比"没聊到"更差，否则会把它排到很后面而不是
+     *   正常参与排序——反过来说，也不给它负分去惩罚一条本来就重要的记忆。
+     */
+    fun similarityOf(cosine: Double?): Double = (cosine ?: NO_SIMILARITY).coerceIn(0.0, 1.0)
+
+    /** 关键词分支的相似度：命中满分，没命中 0。 */
+    fun keywordSimilarity(matched: Boolean): Double = if (matched) 1.0 else NO_SIMILARITY
+
+    fun components(similarity: Double, importance: Int, updatedAt: Long, now: Long): Components =
+        Components(
+            similarity = similarity.coerceIn(0.0, 1.0),
+            importance = importanceOf(importance),
+            recency = recencyOf(now - updatedAt)
+        )
+
+    fun score(similarity: Double, importance: Int, updatedAt: Long, now: Long): Double =
+        components(similarity, importance, updatedAt, now).total
+}

@@ -1,0 +1,414 @@
+package com.aster.companion.agent.life
+
+import android.util.Log
+import com.aster.companion.agent.AgentTurnCoordinator
+import com.aster.companion.agent.OpenAiCompatibleClient
+import com.aster.companion.data.CharacterEntity
+import com.aster.companion.data.CharacterLifeStateEntity
+import com.aster.companion.data.CharacterLivingStateEntity
+import com.aster.companion.data.CompanionDao
+import com.aster.companion.data.CompanionSecretCipher
+import com.aster.companion.domain.CharacterSchedule
+import java.time.ZoneId
+import java.util.concurrent.ConcurrentHashMap
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlin.random.Random
+import kotlinx.coroutines.sync.Mutex
+
+/**
+ * 她的生活循环：**接着做手头的事，到点了才问一句要不要换**。
+ *
+ * ## 和「排一天」的区别
+ *
+ * 以前是提前排好一整天（几点吃饭、几点睡），她只是在执行表格——一看就假。
+ * 现在只维护**一件事**：她现在在做什么、做了多久、她自己的打算。
+ * 时间没到就直接返回，**什么都不做**（她还在做，别打扰她）；到了才问她一次，
+ * 而她的回答大多数时候是「继续」。
+ *
+ * 换的理由来自**她自己**（懂上下文的那次判断），不是「时间到了」，也不是一串自己漂移的数字。
+ *
+ * ## 内存里的东西丢了怎么办
+ *
+ * 「下次该问的时间」和「她的打算」放在内存里，进程重启会丢。丢了不要紧——
+ * 只是下一次 tick 会重新问她一遍，最坏也不过是她在同一件事上被多问一次。
+ */
+@Singleton
+class LifeTicker @Inject constructor(
+    private val dao: CompanionDao,
+    private val client: OpenAiCompatibleClient,
+    private val cipher: CompanionSecretCipher
+) {
+
+    private data class Pending(val reviewAt: Long, val intent: String)
+
+    private val pending = ConcurrentHashMap<String, Pending>()
+    private val locks = ConcurrentHashMap<String, Mutex>()
+    private val rnd = Random(System.currentTimeMillis())
+
+    /**
+     * 把她说的"还要做多久"落成一条**可恢复的计划**。
+     *
+     * 存在 `companion_world_states` 里（scope = LIFE_PLAN，id = `life-plan:<角色>`），
+     * 因为它是"她此刻的打算"，和胶囊状态同类；用这张现成的表就不必再动 Room 版本。
+     * 内容格式：`reviewAt|intent`。
+     */
+    private suspend fun setPending(characterId: String, reviewAt: Long, intent: String) {
+        pending[characterId] = Pending(reviewAt, intent)
+        // 顺手把"下次什么时候更新"写进胶囊的「依据」，这样你在胶囊展开时能直接看到
+        // 她的打算（而不是只能靠感觉猜后台有没有在动）。只动 evidence，不动活动/心情。
+        runCatching {
+            val current = dao.livingState(characterId)
+            if (current != null) {
+                dao.upsertLivingState(
+                    current.copy(
+                        evidence = "打算" + planPhrase(reviewAt, intent),
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
+        runCatching {
+            dao.upsertWorldState(
+                com.aster.companion.data.WorldStateEntity(
+                    id = planId(characterId),
+                    characterId = characterId,
+                    threadId = null,
+                    scope = "LIFE_PLAN",
+                    content = "$reviewAt|${intent.replace("|", " ")}",
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
+    /** 读取她当前的计划（内存优先，其次库里那份）。 */
+    private suspend fun planFor(characterId: String): Pending? {
+        pending[characterId]?.let { return it }
+        val row = runCatching { dao.worldStates(characterId, "LIFE_PLAN").maxByOrNull { it.updatedAt } }.getOrNull() ?: return null
+        val raw = row.content
+        val at = raw.substringBefore('|').toLongOrNull() ?: return null
+        val intent = raw.substringAfter('|', "")
+        return Pending(at, intent).also { pending[characterId] = it }
+    }
+
+    private fun planId(characterId: String) = "life-plan:$characterId"
+
+    /** 「打算再做 35 分钟（15:40 更新）」这样的人话。 */
+    private fun planPhrase(reviewAt: Long, intent: String): String {
+        val minutes = ((reviewAt - System.currentTimeMillis()) / 60_000L).coerceAtLeast(0L)
+        val clock = java.time.Instant.ofEpochMilli(reviewAt)
+            .atZone(ZoneId.systemDefault())
+            .toLocalTime()
+        val tail = intent.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()
+        return "再做 $minutes 分钟，${"%02d:%02d".format(clock.hour, clock.minute)} 更新$tail"
+    }
+    /** 她最近的私聊里最后一条消息的时间（0 = 还没有对话）。 */
+    private suspend fun lastConversationAt(characterId: String): Long = runCatching {
+        dao.latestPrivateThread(characterId)?.let { thread ->
+            dao.recentMessages(thread.id, 1).firstOrNull()?.createdAt
+        }
+    }.getOrNull() ?: 0L
+
+    /** 一拍：推进需求，然后在「该问的时候」问她一次。 */
+    suspend fun tick(now: Long, zone: ZoneId = ZoneId.systemDefault()) {
+        dao.allCharacters().forEach { character ->
+            runCatching { tickOne(character, now, zone) }
+                .onFailure { Log.w(TAG, "life tick failed for ${character.id}", it) }
+        }
+    }
+
+    /**
+     * 她刚和人说过话。
+     *
+     * 两件事：孤单掉一截；手头这件事**立刻重新评估一次**——真人被搭话之后，
+     * 手上的事多半是要断一下的。
+     */
+    suspend fun onTalkedTo(characterId: String, now: Long) {
+        // 只做一件事：把"下次评估她手头这件事"的时间拉到当下 —— 被搭话之后，手上的事多半要断一下。
+        // （以前这里还会改孤独值，那套数值已经删掉。）
+        setPending(characterId, reviewAt = now, intent = pending[characterId]?.intent.orEmpty())
+    }
+
+    /**
+     * 用户手动要求「立刻把她的状态跟对话对齐」（胶囊上的「立即同步」按钮）。
+     *
+     * 与自动流程**只有一处不同**：跳过下面两道时间闸（静默闸 + 到点闸）。
+     * 其余一切照旧 —— 仍然是"带着最近这段对话去问一次模型"，不是抠她最后一句话，
+     * 所以当初那个"经常变错"的老毛病不会因此回来。
+     * 睡着中仍然不推进（那是她自己定下的、有明确结束时间的状态）。
+     */
+    suspend fun syncNow(characterId: String, now: Long = System.currentTimeMillis()) {
+        val character = dao.character(characterId) ?: return
+        tickOne(character, now, ZoneId.systemDefault(), force = true)
+    }
+
+    private suspend fun tickOne(character: CharacterEntity, now: Long, zone: ZoneId, force: Boolean = false) {
+        val living = dao.livingState(character.id)
+
+        // **不再维护能量/压力/孤独那套数值**（用户要求：数值没用）。
+        // 她累不累、要不要睡，由下面那次"带完整上下文"的模型判断决定，不再靠一串自己漂移的数字。
+        // 睡得着不着只看时间：sleepUntil 到了就醒。
+
+        // 2. **对话彻底静默 30 分钟之后，才允许推进她的状态**（用户明确要求）。
+        //    对话还在进行时，"她现在在做什么"应该由这场对话本身回答；后台每隔几十秒替她改一次，
+        //    就会出现"聊到一半胶囊自己变了、而且经常变错"。
+        //    数值（能量/压力/孤独）照旧随时间走，那个不影响观感；被挡住的只是
+        //    **活动 / 心情 / 睡着 / 换事做**这些状态写入。
+        //    静默满 30 分钟后由下面第 4 步带着**最近这段对话**去问一次模型（不是抠一句话）。
+        val lastConversationAt = lastConversationAt(character.id)
+        if (!force && lastConversationAt > 0L && now - lastConversationAt < CONVERSATION_SETTLE_MS) return
+
+        // 睡着中：还没到点就什么都不做；到点了就写"刚醒"，然后接着过下一段。
+        val sleepUntil = living?.sleepUntil
+        if (sleepUntil != null) {
+            if (now < sleepUntil) return
+            dao.upsertLivingState(
+                rebuildLivingState(character.id, living, activity = "刚醒", locationId = HOME, mood = "", now = now)
+            )
+            setPending(character.id, now, "")
+            return
+        }
+
+        // 3. 还没到可以问的时候——她在做手头的事，这一拍什么都不做。
+        //    这是「不像快照」的关键：不换才是常态。
+        //
+        //    知道她是什么时候开始这件事的，就按那个时间往后推（重启后不会刚起来就问一遍）；
+        //    **完全没有状态**（全新角色）或者不知道起始时间时，这一拍就问 —— 否则她要先空转
+        //    INITIAL_REVIEW_MS，界面上的胶囊也一直只有兜底的「安静待着」。
+        val knownStart = living?.activityStartedAt?.takeIf { it > 0 }
+        // **她说多久就是多久**：计划的时刻落在库里（进程重启、App 被杀都不会丢），
+        // 内存里那份只是缓存。没有计划时才退回"起始时间 + 25 分钟"。
+        val due = planFor(character.id)?.reviewAt
+            ?: knownStart?.plus(INITIAL_REVIEW_MS)
+            ?: now
+        if (!force && now < due) return
+
+        // 4. 到点了，问她一次。
+        val lock = locks.getOrPut(character.id) { Mutex() }
+        if (!lock.tryLock()) return
+        try {
+            val decision = ask(character, living, now, zone)
+                // 问不出来 / 认不出来 → 当她继续做手头的事，只把下次问的时间推后。
+                ?: LifeSwitchPolicy.Decision.Continue(intent = pending[character.id]?.intent.orEmpty())
+            applyDecision(character, living, decision, now)
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    /** 问一次「要不要换」。任何失败都返回 null（= 继续）。 */
+    private suspend fun ask(
+        character: CharacterEntity,
+        living: CharacterLivingStateEntity?,
+        now: Long,
+        zone: ZoneId
+    ): LifeSwitchPolicy.Decision? {
+        val profile = dao.modelProfile(AgentTurnCoordinator.CONVERSATION_MODEL)
+            ?.takeIf { it.enabled && !it.encryptedApiKey.isNullOrBlank() }
+            ?: return null
+        val apiKey = runCatching { cipher.decrypt(requireNotNull(profile.encryptedApiKey)) }.getOrNull()
+            ?: return null
+
+        val moment = LivingMoment(
+            activity = living?.currentActivity?.takeIf { it.isNotBlank() } ?: "闲着",
+            startedAt = living?.activityStartedAt?.takeIf { it > 0 } ?: now,
+            mood = living?.mood.orEmpty(),
+            locationId = living?.locationId ?: HOME,
+            intent = pending[character.id]?.intent.orEmpty(),
+            reviewAt = now
+        )
+        val input = LifeSwitchPolicy.Input(
+            characterName = character.name,
+            personalityPrompt = character.personalityPrompt,
+            relationshipPrompt = character.relationshipPrompt,
+            moment = moment,
+            now = now,
+            zone = zone,
+            // **用近期的完整上下文判断她的状态**（用户要求）：不是抠一句话，也不是只看最后两条。
+            // 先给"更早之前聊过"的摘要，再给最近 RECENT_LIMIT 条对话原文 —— 只给六条时，
+            // 她刚聊完一件事、后面几条没再提，模型就会判成"她在闲着"，状态自然不准。
+            recent = run {
+                val thread = dao.latestPrivateThread(character.id)
+                val summary = thread?.let { dao.threadSummary(it.id)?.summary?.trim() }
+                // 现在是**结构化状态**（人物/称谓/地点时间/已完成/未完成/关键事实），600 字以内整段给，
+                // 不再 take(300) —— 截一半会把"未完成"这类字段切掉，反而看不出她手头有什么没做完。
+                val stateLine = summary?.takeIf { it.isNotBlank() }?.let { "（你们之间已经发生过的事）${it.take(600)}" }
+                val lines = thread?.let { t -> dao.recentMessages(t.id, RECENT_LIMIT).asReversed() }.orEmpty()
+                    .mapNotNull { message ->
+                        val body = message.body.trim().replace(WHITESPACE, " ")
+                        if (body.isEmpty() || body.startsWith("stream:")) null
+                        else "${if (message.fromUser) "他" else character.name}：$body"
+                    }
+                // 这一段同样是发给她正在用的那个模型的，必须压进上下文预算：
+                // 以前是 40 条**不截断**的原文（色情长回复一条就几百字），16K 模型很容易被它顶爆。
+                // 省预算的顺序和聊天一致：从最旧的整条往下丢，最近的对话一条不动。
+                val budget = LIFE_CONTEXT_MAX_CHARS - (stateLine?.length ?: 0)
+                val kept = ArrayList<String>()
+                var used = 0
+                for (line in lines.asReversed()) {
+                    if (used + line.length > budget) break
+                    kept.add(line)
+                    used += line.length
+                }
+                buildList {
+                    stateLine?.let { add(it) }
+                    addAll(kept.asReversed())
+                }
+            }
+        )
+
+        val raw = client.chat(
+            profile = profile,
+            apiKey = apiKey,
+            systemPrompt = LifeSwitchPolicy.system(input),
+            userPrompt = LifeSwitchPolicy.user(input)
+        ).getOrNull() ?: return null
+
+        return LifeSwitchPolicy.parse(raw)
+    }
+
+    private suspend fun applyDecision(
+        character: CharacterEntity,
+        living: CharacterLivingStateEntity?,
+        decision: LifeSwitchPolicy.Decision,
+        now: Long
+    ) {
+        // 她生活里的「事件」——换事、睡着、接着做——只从这里打出来。
+        // 这是观察她这一天最直接的窗口（界面目前不展示她的状态）。
+        Log.i(
+            TAG,
+            "${character.name}：${living?.currentActivity ?: "（还没有状态）"} → " + when (decision) {
+                is LifeSwitchPolicy.Decision.Continue ->
+                    "继续（${decision.intent.ifBlank { "没特别打算" }}）"
+                is LifeSwitchPolicy.Decision.Switch ->
+                    "换成「${decision.activity}」（${decision.reason.ifBlank { "没说为什么" }}）"
+                is LifeSwitchPolicy.Decision.Sleep -> "睡了"
+            }
+        )
+        when (decision) {
+            is LifeSwitchPolicy.Decision.Continue -> {
+                setPending(character.id, 
+                    reviewAt = LifeSwitchPolicy.nextReviewAt(now, decision, rnd),
+                    intent = decision.intent
+                )
+            }
+
+            is LifeSwitchPolicy.Decision.Switch -> {
+                dao.upsertLivingState(
+                    rebuildLivingState(
+                        characterId = character.id,
+                        previous = living,
+                        activity = decision.activity,
+                        locationId = decision.locationId ?: living?.locationId ?: HOME,
+                        mood = decision.mood,
+                        now = now,
+                        startNewActivity = true,
+                        reason = decision.reason
+                    )
+                )
+                setPending(character.id, 
+                    reviewAt = LifeSwitchPolicy.nextReviewAt(now, decision, rnd),
+                    intent = decision.intent
+                )
+            }
+
+            is LifeSwitchPolicy.Decision.Sleep -> {
+                val until = now + rnd.nextLong(SLEEP_MIN_MS, SLEEP_MAX_MS)
+                dao.upsertLivingState(
+                    rebuildLivingState(
+                        characterId = character.id,
+                        previous = living,
+                        activity = "睡着了",
+                        locationId = living?.locationId ?: HOME,
+                        mood = "",
+                        now = now,
+                        sleepUntil = until
+                    )
+                )
+                setPending(character.id, until, decision.intent.ifBlank { "睡一觉" })
+            }
+        }
+    }
+
+    /**
+     * 只改该改的字段，其余保持原样——尤其是 `scheduleJson`，那是她的作息，不能被这里覆盖掉。
+     *
+     * 活动文本写成 **「在{地点名}，{活动}」**：系统里 `extractLocation` 只认这个格式，
+     * 少了地点前缀会让聊天顶栏的家庭距离标注消失、胶囊里的地点退化成"家里某处"。
+     * 地点名解析不出来时保持原来的纯活动文本（**不硬编地点**，宁可没有也不要写错）。
+     */
+    private suspend fun rebuildLivingState(
+        characterId: String,
+        previous: CharacterLivingStateEntity?,
+        activity: String,
+        locationId: String,
+        mood: String,
+        now: Long,
+        sleepUntil: Long? = null,
+        startNewActivity: Boolean = false,
+        reason: String = ""
+    ): CharacterLivingStateEntity {
+        val activityText = if (reason.isBlank()) activity else "$activity（$reason）"
+        val placeName = locationId.takeIf { it.isNotBlank() }
+            ?.let { id -> runCatching { dao.worldLocation(id)?.displayName }.getOrNull() }
+            ?.takeIf { it.isNotBlank() }
+        val withPlace = if (placeName != null && !activityText.startsWith("在")) {
+            "在$placeName，$activityText"
+        } else {
+            activityText
+        }
+        return CharacterLivingStateEntity(
+            characterId = characterId,
+            mood = mood.ifBlank { previous?.mood ?: DEFAULT_MOOD },
+            currentActivity = withPlace,
+            activityStartedAt = if (startNewActivity || previous?.currentActivity != withPlace) {
+                now
+            } else {
+                previous?.activityStartedAt?.takeIf { it > 0 } ?: now
+            },
+            sleepUntil = sleepUntil,
+            scheduleJson = previous?.scheduleJson.orEmpty(),
+            updatedAt = now,
+            locationId = locationId
+        )
+    }
+
+    private companion object {
+        const val TAG = "TongpinLife"
+        const val HOME = "home"
+        const val DEFAULT_MOOD = "calm"
+        const val RECENT_LIMIT = 40
+
+        /**
+         * 这一拍喂给模型的上下文（状态 + 最近对话原文）最多多少字。
+         *
+         * 6,000 字 ≈ 6,000 token，配合状态 600 字与它自己的 system，16K 模型也留得下输出余量。
+         * 超了从**最旧的整条**开始丢，最近的对话保持完整。
+         */
+        const val LIFE_CONTEXT_MAX_CHARS = 6_000
+
+        /** 重启后第一次评估的间隔：别刚起来就问她一次，让她先把一件事做上一阵。 */
+        const val INITIAL_REVIEW_MS = 25 * 60_000L
+
+        /**
+         * 对话静默多久才算"这场对话结束了"，才允许后台推进她的状态。
+         *
+         * 用户定的 30 分钟：聊天期间她不该被后台改状态；聊完半小时后才根据**这段对话**
+         * 重新判断她现在在做什么。
+         *
+         * ⚠️ 已从 30 分钟缩到 5 分钟（用户现象：**「胶囊跟对话不一致」**——她说她去睡了，
+         * 胶囊还能显示"在工作"半小时）。
+         *
+         * **缩短它不会让"聊到一半状态自己变"回来**：这个计时器读的是**最后一条消息的时间**
+         * （见上面那段判断），只要还在说话就不断重置，静默永远不满 5 分钟。
+         * 被放松的只是"你停下不说话之后，胶囊多久追上对话"。
+         */
+        const val CONVERSATION_SETTLE_MS = 5 * 60_000L
+
+        const val SLEEP_MIN_MS = 6 * 3_600_000L
+        const val SLEEP_MAX_MS = 9 * 3_600_000L
+
+        val WHITESPACE = Regex("\\s+")
+    }
+}

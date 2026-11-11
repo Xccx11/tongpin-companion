@@ -1,0 +1,122 @@
+package com.aster.companion.agent.world
+
+import com.aster.companion.data.CharacterEntity
+import com.aster.companion.data.CharacterLivingStateEntity
+import com.aster.companion.data.WorldLocationEntity
+import com.aster.companion.data.WorldStateRowEntity
+import com.aster.companion.data.WorldUserStateEntity
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class WorldSceneProjectionTest {
+
+    @Test
+    fun `scene falls back to home when user location is not registered`() {
+        val projection = WorldSceneProjectionBuilder.build(
+            world = worldState(),
+            user = WorldUserStateEntity(
+                locationId = "removed.location",
+                visibility = "VISIBLE",
+                lastAction = "",
+                lastActionAt = 1L,
+                updatedAt = 1L
+            ),
+            locations = emptyList(),
+            characters = emptyList(),
+            livingStates = emptyList()
+        )
+
+        assertEquals("home.unknown", projection.locationId)
+        assertEquals("家中", projection.locationName)
+    }
+
+    @Test
+    fun `scene is first person and only exposes public character activity`() {
+        val projection = WorldSceneProjectionBuilder.build(
+            world = worldState(),
+            user = WorldUserStateEntity(
+                locationId = "home.living_room",
+                visibility = "VISIBLE",
+                lastAction = "观察",
+                lastActionAt = 1L,
+                updatedAt = 1L
+            ),
+            locations = listOf(location("home.living_room", "客厅")),
+            characters = listOf(character("linxi", "林夕")),
+            livingStates = listOf(
+                CharacterLivingStateEntity(
+                    characterId = "linxi",
+                    mood = "满足",
+                    currentActivity = "坐在沙发上看书",
+                    activityStartedAt = 1L,
+                    sleepUntil = null,
+                    scheduleJson = "",
+                    updatedAt = 1L,
+                    locationId = "home.living_room"
+                )
+            )
+        )
+
+        assertEquals("客厅", projection.locationName)
+        assertTrue(projection.sceneNarration.startsWith("你现在在客厅"))
+        assertEquals(listOf("林夕"), projection.characters.map { it.name })
+        assertEquals("坐在沙发上看书", projection.characters.single().activity)
+        assertFalse(projection.toString().contains("满足"))
+    }
+
+    @Test
+    fun `scene exposes registered destinations except the current location`() {
+        val projection = WorldSceneProjectionBuilder.build(
+            world = worldState(),
+            user = WorldUserStateEntity(
+                locationId = "home.living_room",
+                visibility = "VISIBLE",
+                lastAction = "",
+                lastActionAt = 1L,
+                updatedAt = 1L
+            ),
+            locations = listOf(
+                WorldLocationEntity(WorldLocationCatalog.HOME_ID, "家中", null, createdAt = 1L, updatedAt = 1L),
+                location("home.living_room", "客厅"),
+                location("home.kitchen", "厨房"),
+                WorldLocationEntity("outside", "外出", null, createdAt = 1L, updatedAt = 1L)
+            ),
+            characters = emptyList(),
+            livingStates = emptyList()
+        )
+
+        assertEquals(setOf("家中", "厨房", "外出"), projection.nearbyLocations.map { it.name }.toSet())
+        assertFalse(projection.nearbyLocations.any { it.locationId == "home.living_room" })
+    }
+
+    private fun worldState() = WorldStateRowEntity(
+        id = "world",
+        worldTime = 1L,
+        weather = "晴",
+        location = "",
+        updatedAt = 1L,
+        timePhase = "晚上",
+        environment = "灯光开启"
+    )
+
+    private fun location(id: String, name: String) = WorldLocationEntity(
+        id = id,
+        displayName = name,
+        parentId = "home",
+        createdAt = 1L,
+        updatedAt = 1L
+    )
+
+    private fun character(id: String, name: String) = CharacterEntity(
+        id = id,
+        name = name,
+        avatarUri = null,
+        personalityPrompt = "",
+        appearancePrompt = "",
+        referenceImageUri = null,
+        createdAt = 1L,
+        updatedAt = 1L
+    )
+}

@@ -1,0 +1,593 @@
+package com.aster.companion.data
+
+import androidx.room.Dao
+import androidx.room.Database
+import androidx.room.Entity
+import androidx.room.Index
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.PrimaryKey
+import androidx.room.Query
+import androidx.room.RoomDatabase
+import androidx.room.Transaction
+import androidx.room.TypeConverter
+import androidx.room.TypeConverters
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+import com.aster.companion.domain.ConversationType
+import com.aster.companion.domain.EventState
+import com.aster.companion.domain.MemoryKind
+import com.aster.companion.domain.GroupAtmosphere
+import kotlinx.coroutines.flow.Flow
+
+@Entity(tableName = "companion_characters")
+data class CharacterEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val avatarUri: String?,
+    val personalityPrompt: String,
+    val appearancePrompt: String,
+    val referenceImageUri: String?,
+    val createdAt: Long,
+    val updatedAt: Long,
+    /** A separate visual-treatment reference. [referenceImageUri] remains the identity reference. */
+    val styleReferenceImageUri: String? = null,
+    /** Conversational distance and role toward the user; never used as visual identity. */
+    val relationshipPrompt: String = ""
+)
+
+@Entity(tableName = "companion_threads")
+data class ThreadEntity(
+    @PrimaryKey val id: String,
+    val type: ConversationType,
+    val title: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val contextVersion: Long = 0,
+    /** Old messages and non-pinned context before this instant are invisible to this thread. */
+    val memorySince: Long = 0
+)
+
+@Entity(tableName = "companion_thread_participants", primaryKeys = ["threadId", "characterId"])
+data class ThreadParticipantEntity(val threadId: String, val characterId: String, val ordinal: Int)
+
+@Entity(tableName = "companion_messages")
+data class MessageEntity(
+    @PrimaryKey val id: String,
+    val threadId: String,
+    val characterId: String?,
+    val body: String,
+    val imageUri: String?,
+    val fromUser: Boolean,
+    val createdAt: Long,
+    val readAt: Long? = null
+)
+
+@Entity(tableName = "companion_memories")
+data class MemoryEntity(
+    @PrimaryKey val id: String,
+    val characterId: String?,
+    val threadId: String?,
+    val kind: MemoryKind,
+    val content: String,
+    val blockedFromMention: Boolean,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+@Entity(tableName = "companion_diary_photos")
+data class DiaryPhotoEntity(
+    @PrimaryKey val id: String,
+    val characterId: String,
+    val threadId: String,
+    val imageUri: String,
+    val createdAt: Long
+)
+
+@Entity(
+    tableName = "companion_moment_posts",
+    indices = [Index("createdAt"), Index("authorCharacterId")]
+)
+data class MomentPostEntity(
+    @PrimaryKey val id: String,
+    val authorType: String,
+    val authorCharacterId: String?,
+    val body: String,
+    val visibility: String,
+    val source: String,
+    val status: String,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+@Entity(
+    tableName = "companion_moment_media",
+    primaryKeys = ["postId", "ordinal"],
+    indices = [Index("postId")]
+)
+data class MomentMediaEntity(
+    val postId: String,
+    val ordinal: Int,
+    val imageUri: String,
+    val source: String
+)
+
+@Entity(
+    tableName = "companion_moment_reactions",
+    primaryKeys = ["postId", "actorType", "actorId"],
+    indices = [Index("postId")]
+)
+data class MomentReactionEntity(
+    val postId: String,
+    val actorType: String,
+    val actorId: String,
+    val kind: String,
+    val createdAt: Long
+)
+
+@Entity(
+    tableName = "companion_moment_comments",
+    indices = [Index("postId"), Index("createdAt")]
+)
+data class MomentCommentEntity(
+    @PrimaryKey val id: String,
+    val postId: String,
+    val authorType: String,
+    val authorCharacterId: String?,
+    val body: String,
+    val replyToCommentId: String?,
+    val createdAt: Long
+)
+
+@Entity(tableName = "companion_events")
+data class EventEntity(
+    @PrimaryKey val id: String,
+    val source: String,
+    val summary: String,
+    val state: EventState,
+    val occurredAt: Long,
+    val deferUntil: Long?,
+    val consumedAt: Long?
+)
+
+@Entity(tableName = "companion_event_recipients", primaryKeys = ["eventId", "characterId"])
+data class EventRecipientEntity(
+    val eventId: String,
+    val characterId: String,
+    val state: EventState,
+    val deferUntil: Long?,
+    val completedAt: Long?
+)
+
+@Entity(tableName = "companion_agent_turns")
+data class AgentTurnEntity(
+    @PrimaryKey val id: String,
+    val threadId: String?,
+    val eventId: String?,
+    val snapshotVersion: Long,
+    val decisionJson: String,
+    val createdAt: Long
+)
+
+@Entity(tableName = "companion_action_audit")
+data class ActionAuditEntity(
+    @PrimaryKey val id: String,
+    val source: String,
+    val capabilityId: String,
+    val transport: String,
+    val confirmation: String,
+    val resultSummary: String,
+    val createdAt: Long
+)
+
+@Entity(tableName = "companion_pending_actions")
+data class PendingActionEntity(
+    @PrimaryKey val id: String,
+    val eventId: String?,
+    val threadId: String?,
+    val capabilityId: String,
+    val transport: String,
+    val argumentsJson: String,
+    val state: String,
+    val createdAt: Long,
+    val resolvedAt: Long?,
+    val resultSummary: String?
+)
+
+@Entity(tableName = "companion_model_profiles")
+data class ModelProfileEntity(
+    @PrimaryKey val id: String,
+    val kind: String,
+    val baseUrl: String,
+    val modelName: String,
+    val enabled: Boolean,
+    val timeoutSeconds: Int,
+    val encryptedApiKey: String?,
+    val lastTestResult: String?,
+    val temperature: Double = com.aster.companion.domain.ConversationTemperature.DEFAULT,
+    val thinkingEnabled: Boolean = false,
+    val reasoningEffort: String = com.aster.companion.domain.ConversationReasoning.DEFAULT_EFFORT,
+    val topP: Double = 0.85,
+    val frequencyPenalty: Double = 0.30,
+    val presencePenalty: Double = 0.20,
+    /** Explicit image transport; AUTO is only a compatibility value for pre-protocol profiles. */
+    val imageProtocol: String = "AUTO"
+)
+
+@Entity(tableName = "companion_image_api_pool")
+data class ImageApiPoolEntity(
+    @PrimaryKey val id: String,
+    val label: String,
+    val baseUrl: String,
+    val modelName: String,
+    val encryptedApiKey: String,
+    val enabled: Boolean,
+    val createdAt: Long,
+    /** 该 API 专属的生图总规则（比如 wai 用英文规则、z-image 用中文规则）；空则用全局总规则。 */
+    val generationRule: String = "",
+    /** Explicit image transport; AUTO is only a compatibility value for pre-protocol profiles. */
+    val imageProtocol: String = "AUTO"
+)
+
+/** Device-only encrypted recovery point. The copied database still requires this device's Keystore key. */
+@Entity(tableName = "companion_snapshot_manifests")
+data class SnapshotManifestEntity(
+    @PrimaryKey val id: String,
+    val reason: String,
+    val createdAt: Long,
+    val databaseFileName: String,
+    val byteSize: Long,
+    val state: String
+)
+
+/** Canonical record for chat, sensed life events, generated media and completed actions. */
+@Entity(tableName = "companion_timeline_events")
+data class TimelineEventEntity(
+    @PrimaryKey val id: String,
+    val threadId: String?,
+    val characterId: String?,
+    val source: String,
+    val sensitiveLevel: String,
+    val summary: String,
+    val payloadJson: String?,
+    val occurredAt: Long,
+    val createdAt: Long
+)
+
+/** Private character fiction and explicitly shared relationship fiction are stored separately. */
+@Entity(tableName = "companion_world_states")
+data class WorldStateEntity(
+    @PrimaryKey val id: String,
+    val characterId: String?,
+    val threadId: String?,
+    val scope: String,
+    val content: String,
+    val updatedAt: Long
+)
+
+@Entity(tableName = "companion_semantic_memories")
+data class SemanticMemoryEntity(
+    @PrimaryKey val id: String,
+    val characterId: String?,
+    val threadId: String?,
+    val timelineEventId: String?,
+    val content: String,
+    val embedding: ByteArray?,
+    val importance: Int,
+    val retrievable: Boolean,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+/** Survives process death for image jobs, diary writing, planning and confirmed device actions. */
+@Entity(tableName = "companion_durable_tasks")
+data class DurableTaskEntity(
+    @PrimaryKey val id: String,
+    val type: String,
+    val threadId: String?,
+    val characterId: String?,
+    val payloadJson: String,
+    val state: String,
+    val attempts: Int,
+    val nextRunAt: Long,
+    val startedAt: Long?,
+    val completedAt: Long?,
+    val errorSummary: String?
+)
+
+@Entity(tableName = "companion_agent_runs")
+data class AgentRunEntity(
+    @PrimaryKey val id: String,
+    val triggerType: String,
+    val threadId: String?,
+    val characterId: String?,
+    val timelineEventId: String?,
+    val state: String,
+    val planJson: String?,
+    val resultJson: String?,
+    val createdAt: Long,
+    val completedAt: Long?
+)
+
+/** A compact, user-manageable fact that can be safely shared inside one family group. */
+@Entity(
+    tableName = "companion_family_group_facts",
+    indices = [Index("groupThreadId"), Index("ownerCharacterId")]
+)
+data class FamilyGroupFactEntity(
+    @PrimaryKey val id: String,
+    val groupThreadId: String,
+    val ownerCharacterId: String?,
+    val summary: String,
+    val sourceThreadId: String,
+    val sourceKind: String,
+    val createdAt: Long,
+    val expiresAt: Long?,
+    val sensitivity: String,
+    val allowedInGroup: Boolean
+)
+
+/** Emotional turn-taking state is group-scoped and never treated as user reality. */
+@Entity(tableName = "companion_group_member_states", primaryKeys = ["groupThreadId", "characterId"])
+data class GroupMemberStateEntity(
+    val groupThreadId: String,
+    val characterId: String,
+    val attention: Int,
+    val affection: Int,
+    val jealousy: Int,
+    val unspokenIntent: String,
+    val lastSpokeAt: Long?
+)
+
+@Entity(tableName = "companion_group_settings")
+data class GroupSettingsEntity(
+    @PrimaryKey val groupThreadId: String,
+    val atmosphere: GroupAtmosphere,
+    val updatedAt: Long,
+    val proactiveEnabled: Boolean = true,
+    /** 群组类型：FAMILY=家庭（成员是一家人，互知生活状态）；GENERAL=普通群聊。 */
+    val groupType: String = "GENERAL"
+)
+
+/** Records which visible group messages have already inspired a character's private follow-up. */
+@Entity(
+    tableName = "companion_group_private_followup_uses",
+    primaryKeys = ["groupThreadId", "characterId", "messageId"],
+    indices = [Index("groupThreadId"), Index("characterId")]
+)
+data class GroupPrivateFollowUpUseEntity(
+    val groupThreadId: String,
+    val characterId: String,
+    val messageId: String,
+    val usedAt: Long
+)
+
+/** Lets group clearing revoke only semantic entries derived from that group. */
+@Entity(tableName = "companion_group_derived_memory_links", primaryKeys = ["factId", "characterId", "semanticMemoryId"])
+data class GroupDerivedMemoryLinkEntity(
+    val factId: String,
+    val characterId: String,
+    val semanticMemoryId: String
+)
+
+
+/** 角色生活状态：心情/当前活动/作息。世界引擎批量推演的结果落点。 */
+@Entity(tableName = "companion_character_living_states")
+data class CharacterLivingStateEntity(
+    @PrimaryKey val characterId: String,
+    val mood: String,
+    val currentActivity: String,
+    val activityStartedAt: Long,
+    val sleepUntil: Long?,
+    val scheduleJson: String,
+    val updatedAt: Long,
+    /** Stable virtual-world location. Legacy text remains in [currentActivity]. */
+    val locationId: String = "home.unknown",
+    /** 这条状态是从哪来的（她的原话 / 自主生活）：胶囊展开时显示，便于核对"为什么是这个状态"。 */
+    val evidence: String = ""
+)
+
+/** 角色生命状态（v2.1 自主生活）：能量/压力/孤独/社交需求/目标。数值由代码计算，DeepSeek 只做决策。 */
+@Entity(tableName = "companion_character_life_state")
+data class CharacterLifeStateEntity(
+    @PrimaryKey val characterId: String,
+    val energy: Int = 80,
+    val stress: Int = 40,
+    val loneliness: Int = 30,
+    val socialNeed: Int = 40,
+    val currentGoal: String = "",
+    val hiddenGoal: String = "",
+    val updatedAt: Long = 0L
+)
+
+/** 角色间关系五维（双向，A→B 与 B→A 各一条）：affection 亲密度/trust 信任/dependence 依赖/understanding 理解/conflict 冲突。 */
+@Entity(tableName = "companion_relationships", primaryKeys = ["characterAId", "characterBId"])
+data class RelationshipEntity(
+    val characterAId: String,
+    val characterBId: String,
+    val affection: Int = 50,
+    val trust: Int = 50,
+    val dependence: Int = 30,
+    val understanding: Int = 40,
+    val conflict: Int = 10,
+    val updatedAt: Long = 0L
+)
+
+/** 角色间互动请求：A 邀请 B 一起做某事 → B 接受/拒绝/延迟。 */
+@Entity(tableName = "companion_interaction_requests")
+data class InteractionRequestEntity(
+    @PrimaryKey val id: String,
+    val senderCharacterId: String,
+    val receiverCharacterId: String,
+    val action: String,
+    val reason: String,
+    val status: String, // pending / accepted / rejected / expired
+    val expireAt: Long,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+/** 共同活动生命周期：START → RUNNING → FINISH → EFFECT → MEMORY。 */
+@Entity(tableName = "companion_activities")
+data class ActivityEntity(
+    @PrimaryKey val id: String,
+    val type: String,
+    val participantsJson: String,
+    val location: String,
+    val durationMinutes: Int,
+    val status: String, // started / running / finished
+    val startedAt: Long,
+    val finishedAt: Long?,
+    val effectJson: String,
+    val createdAt: Long
+)
+
+/** v2.1.5 人格核心：数字权重（倾向强度）+ 文本描述（AI 人格理解）。数字代码算，文本角色创建时写一次。 */
+@Entity(tableName = "companion_character_personality")
+data class CharacterPersonalityEntity(
+    @PrimaryKey val characterId: String,
+    val care: Int = 50,
+    val initiative: Int = 50,
+    val conversation: Int = 50,
+    val independence: Int = 50,
+    val warmth: Int = 50,
+    val coreDescription: String = "",
+    val behaviorTendency: String = "",
+    val updatedAt: Long = 0L
+)
+
+/** v2.1.5 角色当前阶段目标：行为除状态/人格/记忆外还受当前目标影响。 */
+@Entity(tableName = "companion_character_goals")
+data class CharacterGoalEntity(
+    @PrimaryKey val id: String,
+    val characterId: String,
+    val goal: String,
+    val importance: Int,       // 1-10
+    val source: String,        // 事件/用户/推演
+    val expireTime: Long,
+    val resolved: Boolean = false,
+    val createdAt: Long
+)
+
+/** v2.1.5 决策心理摘要（不保存完整 CoT）：只存摘要供人格连续性参考。 */
+@Entity(tableName = "companion_decision_chains")
+data class DecisionChainEntity(
+    @PrimaryKey val id: String,
+    val characterId: String,
+    val action: String,
+    val emotionSummary: String,    // 情绪摘要
+    val motivation: String,        // 动机
+    val conflictSummary: String,   // 矛盾摘要
+    val decisionReason: String,    // 决定原因
+    val confidence: Int,
+    val createdAt: Long
+)
+
+/** V3.0 世界状态：当前世界时间/天气/地点。 */
+@Entity(tableName = "companion_world_state")
+data class WorldStateRowEntity(
+    @PrimaryKey val id: String,
+    val worldTime: Long,
+    val weather: String,
+    val location: String,
+    val updatedAt: Long,
+    val timePhase: String = "",
+    val environment: String = "",
+    val variablesJson: String = "{}",
+    val lastAdvancedAt: Long = 0L,
+    val lastPlanAttemptAt: Long = 0L,
+    val planRetryAfter: Long = 0L,
+    val worldVersion: Long = 0L
+)
+
+/** The user participates in the world but is never an AI character. */
+@Entity(tableName = "companion_world_user_state")
+data class WorldUserStateEntity(
+    @PrimaryKey val id: String = "user",
+    val locationId: String,
+    val visibility: String,
+    val lastAction: String,
+    val lastActionAt: Long,
+    val updatedAt: Long
+)
+
+/** Registered locations keep world planning independent of display prose. */
+@Entity(tableName = "companion_world_locations")
+data class WorldLocationEntity(
+    @PrimaryKey val id: String,
+    val displayName: String,
+    val parentId: String?,
+    val metadataJson: String = "{}",
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+/** Normalized source of truth for a planned world opportunity. */
+@Entity(tableName = "companion_world_timeline_events", indices = [Index("timelineId"), Index("scheduledAt"), Index("status")])
+data class WorldTimelineEventEntity(
+    @PrimaryKey val id: String,
+    val timelineId: String,
+    val scheduledAt: Long,
+    val latestStartAt: Long,
+    val durationMinutes: Int,
+    val type: String,
+    val initiatorCharacterId: String?,
+    val requiredCharacterIdsJson: String,
+    val optionalCharacterIdsJson: String,
+    val userParticipation: String,
+    val locationId: String,
+    val description: String,
+    val prerequisiteEventIdsJson: String,
+    val prerequisiteJson: String,
+    val expectedEffectsJson: String,
+    val flexibility: String,
+    val interruptStrategy: String,
+    val status: String,
+    val decisionJson: String,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+/** V3.0 未来时间线：WorldDirector 生成的世界级未来计划。 */
+@Entity(tableName = "companion_future_timelines")
+data class FutureTimelineEntity(
+    @PrimaryKey val id: String,
+    val startTime: Long,
+    val endTime: Long,
+    val eventsJson: String,      // 事件列表 JSON
+    val status: String,          // planned / running / finished / cancelled
+    val createdAt: Long
+)
+
+/** V3.0 世界事件：已执行事件 + 结果 + 记忆。 */
+@Entity(tableName = "companion_world_events")
+data class WorldEventEntity(
+    @PrimaryKey val id: String,
+    val eventType: String,
+    val participants: String,
+    val eventTime: Long,
+    val result: String,
+    val memory: String,
+    val createdAt: Long
+)
+
+/** 会话滚动总结：窗口外历史被压缩成语义摘要，降低上下文 token 消耗。 */
+@Entity(tableName = "companion_thread_summaries")
+data class ThreadSummaryEntity(
+    @PrimaryKey val threadId: String,
+    val role: String,
+    val summary: String,
+    val summarizedUpToMessageId: String?,
+    val updatedAt: Long
+)
+
+class CompanionConverters {
+    @TypeConverter fun typeToString(value: ConversationType): String = value.name
+    @TypeConverter fun stringToType(value: String): ConversationType = ConversationType.valueOf(value)
+    @TypeConverter fun memoryToString(value: MemoryKind): String = value.name
+    @TypeConverter fun stringToMemory(value: String): MemoryKind = runCatching { MemoryKind.valueOf(value) }.getOrDefault(MemoryKind.EVENT)
+    @TypeConverter fun eventToString(value: EventState): String = value.name
+    @TypeConverter fun stringToEvent(value: String): EventState = EventState.valueOf(value)
+    @TypeConverter fun atmosphereToString(value: GroupAtmosphere): String = value.name
+    @TypeConverter fun stringToAtmosphere(value: String): GroupAtmosphere = GroupAtmosphere.valueOf(value)
+}

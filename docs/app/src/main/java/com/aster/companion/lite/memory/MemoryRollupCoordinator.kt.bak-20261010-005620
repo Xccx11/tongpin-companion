@@ -1,0 +1,151 @@
+package com.aster.companion.lite.memory
+
+import com.aster.companion.agent.AgentTurnCoordinator
+import com.aster.companion.agent.ImageGenerationCoordinator
+import com.aster.companion.agent.OpenAiCompatibleClient
+import com.aster.companion.data.CompanionDao
+import com.aster.companion.data.CompanionRepository
+import com.aster.companion.data.CompanionSecretCipher
+import com.aster.companion.data.MemoryEntity
+import com.aster.companion.data.MessageEntity
+import com.aster.companion.domain.ConversationType
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+/**
+ * L1 压缩记忆（记忆分册 §4.2）。
+ *
+ * 触发：线程自上次压缩后新增 ≥10 条；或线程 Idle（由调度器调用）。
+ * 一次短 chat → 0–3 条事实 → 与既有 L2 去重后写库；输出 NONE 什么都不写。
+ * 出图中跳过；同一线程同一时刻只跑一次；失败重试 1 次后放弃。
+ */
+@Singleton
+class MemoryRollupCoordinator @Inject constructor(
+    private val dao: CompanionDao,
+    private val repository: CompanionRepository,
+    private val client: OpenAiCompatibleClient,
+    private val cipher: CompanionSecretCipher,
+    private val imageGeneration: ImageGenerationCoordinator
+) {
+
+    /** threadId → 上次压缩时间。 */
+    private val lastRollupAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val locks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+
+    private val trigger = MemoryRollupPolicy.Trigger(
+        minNewMessages = 6,
+        minIntervalMs = 3 * 60_000L
+    )
+
+    /** 清空会话后重置压缩游标，避免旧窗口继续当新记忆源。 */
+    fun resetForThread(threadId: String) {
+        lastRollupAt.remove(threadId)
+    }
+
+    /** 返回本次写入/更新的事实条数（0 表示没压、没新事实或跳过）。 */
+    suspend fun rollUp(threadId: String, now: Long = System.currentTimeMillis()): Int {
+        if (imageGeneration.isImageLaneBusy()) return 0
+        val lock = locks.getOrPut(threadId) { Mutex() }
+        if (lock.isLocked) return 0
+        return lock.withLock {
+            val thread = dao.thread(threadId) ?: return@withLock 0
+            if (thread.type != ConversationType.PRIVATE) return@withLock 0
+            val characterId = dao.participantIds(threadId).firstOrNull() ?: return@withLock 0
+            val window = dao.recentMessages(threadId, MESSAGE_WINDOW).asReversed()
+                .filter { it.body.isNotBlank() && !it.id.startsWith("stream:") }
+            if (window.isEmpty()) return@withLock 0
+            val lastRolledAt = lastRollupAt[threadId] ?: 0L
+            val fresh = window.filter { it.createdAt > lastRolledAt }
+            if (!MemoryRollupPolicy.shouldTrigger(fresh.size, now - lastRolledAt, trigger)) return@withLock 0
+            val character = dao.character(characterId) ?: return@withLock 0
+            val profile = dao.modelProfile(AgentTurnCoordinator.CONVERSATION_MODEL) ?: return@withLock 0
+            if (!profile.enabled || profile.encryptedApiKey.isNullOrBlank()) return@withLock 0
+            val apiKey = cipher.decrypt(requireNotNull(profile.encryptedApiKey))
+            val drafts = requestDrafts(
+                profile = profile,
+                apiKey = apiKey,
+                system = rollupSystem(),
+                user = rollupUser(character.name, fresh)
+            ) ?: return@withLock 0
+            // 无论有没有事实，都推进游标：同一段对话不重复压。
+            lastRollupAt[threadId] = now
+            if (drafts.isEmpty()) return@withLock 0
+            persist(characterId, threadId, drafts)
+            drafts.size
+        }
+    }
+
+    private suspend fun requestDrafts(
+        profile: com.aster.companion.data.ModelProfileEntity,
+        apiKey: String,
+        system: String,
+        user: String
+    ): List<MemoryDraft>? {
+        repeat(MAX_ATTEMPTS) {
+            val raw = client.chat(profile, apiKey, system, user).getOrNull() ?: return null
+            MemoryRollupPolicy.parse(raw)?.let { return it }
+        }
+        return null
+    }
+
+    private suspend fun persist(characterId: String, threadId: String, drafts: List<MemoryDraft>) {
+        val existing = dao.characterMemories(characterId, MEMORY_LIMIT + OVERFLOW_SLACK)
+        val existingContents = existing.map { it.content }
+        drafts.forEach { draft ->
+            val matchedContent = MemoryRollupPolicy.duplicateOf(draft.content, existingContents)
+            val duplicateId = matchedContent?.let { matched -> existing.firstOrNull { it.content == matched }?.id }
+            repository.saveMemory(
+                id = duplicateId,
+                characterId = characterId,
+                // Bind to this thread so "clear chat" / new conversation can forget it.
+                // Manual "让她记住" still uses threadId=null and stays global.
+                threadId = threadId,
+                kind = draft.kind,
+                content = draft.content,
+                blocked = false
+            )
+        }
+        val after = dao.characterMemories(characterId, MEMORY_LIMIT + OVERFLOW_SLACK)
+        if (after.size > MEMORY_LIMIT) {
+            val keep = MemoryBudgetPolicy.trimToLimit(after.map { it.toLiteFact() }, MemoryBudgetPolicy.default)
+                .map { it.id }
+                .toSet()
+            after.filterNot { it.id in keep }.forEach { dao.deleteMemory(it.id) }
+        }
+    }
+
+    private fun rollupSystem(): String = buildString {
+        appendLine("只提炼「以后还用得上的事实」。最多 ${MemoryRollupPolicy.MAX_FACTS_PER_ROLLUP} 条，每条 ≤${MemoryRollupPolicy.MAX_FACT_CHARS} 字中文。")
+        appendLine("每行格式：TYPE: 事实；TYPE 只能是 PREFERENCE、PLAN、EVENT、RELATIONSHIP。")
+        appendLine("禁止：复述整段聊天、日记体、编造用户没说过的事、提系统/模型/提示词。")
+        appendLine("无新事实则只输出 ${MemoryRollupPolicy.NONE}")
+    }.trim()
+
+    private fun rollupUser(characterName: String, messages: List<MessageEntity>): String = buildString {
+        appendLine("角色：${characterName.trim()}")
+        appendLine("最近对话摘录：")
+        messages.forEach { message ->
+            val speaker = if (message.fromUser) "User" else characterName.trim().ifBlank { "角色" }
+            appendLine("- $speaker: ${message.body.trim().replace(WHITESPACE, " ").take(EXCERPT_CHARS)}")
+        }
+    }.trim()
+
+    private fun MemoryEntity.toLiteFact() = LiteMemoryFact(
+        id = id,
+        kind = kind,
+        content = content,
+        updatedAt = updatedAt,
+        blockedFromMention = blockedFromMention
+    )
+
+    private companion object {
+        const val MESSAGE_WINDOW = 24
+        const val MAX_ATTEMPTS = 2
+        const val MEMORY_LIMIT = 80
+        const val OVERFLOW_SLACK = 40
+        const val EXCERPT_CHARS = 60
+        val WHITESPACE = Regex("\\s+")
+    }
+}

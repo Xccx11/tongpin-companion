@@ -1,0 +1,69 @@
+package com.aster.companion.ui
+
+import com.aster.companion.data.MessageEntity
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ChatMessagePresentationTest {
+    @Test
+    fun `stage direction dimming is enabled by default`() {
+        assertTrue(ChatDisplayPreferences().dimStageDirections)
+    }
+
+    @Test
+    fun `splits only character multiline text and keeps original message intact`() {
+        val message = MessageEntity("m1", "t1", "c1", "第一句\n\n第二句", null, false, 1L)
+
+        val displayed = ChatMessagePresentation.displayMessages(listOf(message), true)
+
+        assertEquals(listOf("第一句", "第二句"), displayed.map { it.message.body })
+        assertEquals("第一句\n\n第二句", message.body)
+        assertEquals(listOf("m1:0", "m1:1"), displayed.map { it.id })
+    }
+
+    @Test
+    fun `splits literal newline escapes returned by a conversation provider`() {
+        val message = MessageEntity("m1", "t1", "c1", "第一句\\n\\n第二句", null, false, 1L)
+
+        val displayed = ChatMessagePresentation.displayMessages(listOf(message), true)
+
+        assertEquals(listOf("第一句", "第二句"), displayed.map { it.message.body })
+    }
+
+    @Test
+    fun `splits Unicode paragraph separators returned by a conversation provider`() {
+        val message = MessageEntity("m1", "t1", "c1", "第一句\u2028第二句\u2029第三句", null, false, 1L)
+
+        val displayed = ChatMessagePresentation.displayMessages(listOf(message), true)
+
+        assertEquals(listOf("第一句", "第二句", "第三句"), displayed.map { it.message.body })
+    }
+
+    @Test
+    fun `keeps user messages as one message`() {
+        val message = MessageEntity("m1", "t1", null, "第一句\n第二句", null, true, 1L)
+
+        assertEquals(1, ChatMessagePresentation.displayMessages(listOf(message), true).size)
+    }
+
+    @Test
+    fun `splits a streaming character reply before it is finalized`() {
+        val message = MessageEntity("stream:reply", "t1", "c1", "第一句\n\n第二句", null, false, 1L)
+
+        val displayed = ChatMessagePresentation.displayMessages(listOf(message), true)
+
+        assertEquals(listOf("第一句", "第二句"), displayed.map { it.message.body })
+        assertEquals(listOf("stream:reply:0", "stream:reply:1"), displayed.map { it.id })
+    }
+
+    @Test
+    fun `recognizes the three supported stage direction wrappers`() {
+        val parts = ChatMessagePresentation.parts("好吧（别开视线）<轻轻叹气>(抿嘴)")
+
+        assertEquals(3, parts.count { it.isStageDirection })
+        assertTrue(parts.any { it.value == "（别开视线）" && it.isStageDirection })
+        assertFalse(parts.first().isStageDirection)
+    }
+}

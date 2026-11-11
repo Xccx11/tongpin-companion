@@ -1,0 +1,411 @@
+package com.aster.companion.lite.proactive
+
+import com.aster.companion.agent.AgentTurnCoordinator
+import com.aster.companion.agent.ImageGenerationCoordinator
+import com.aster.companion.agent.OpenAiCompatibleClient
+import com.aster.companion.agent.ScenePromptCoordinator
+import com.aster.companion.data.CompanionDao
+import com.aster.companion.data.CompanionRepository
+import com.aster.companion.data.CompanionSecretCipher
+import com.aster.companion.data.CompanionTimelineRecorder
+import com.aster.companion.data.MessageEntity
+import com.aster.companion.domain.ActionTransport
+import com.aster.companion.domain.AgentActionRequest
+import com.aster.companion.domain.ConfirmationRequirement
+import com.aster.companion.domain.ConversationType
+import com.aster.companion.domain.MomentActors
+import com.aster.companion.lite.LiteProductConfig
+import com.aster.companion.proactive.CompanionNotificationPublisher
+import java.time.Instant
+import java.time.ZoneId
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+/**
+ * Lite 主动消息调度（分册 §4 状态机、§5 探活与同拍、§7 调度、§9 参数）。
+ *
+ * 一拍里按顺序做四件事，任何一件失败都不影响其余：
+ * 1. 最多 4 槽并行探活（两段式每角色占 2 槽），每拍落库受限流；
+ * 2. 探活若返回 `PHOTO:` 意图 → 走 Scene 流水线写 tag → 交给图片动作链路出图（显存独占）；
+ * 3. 每拍最多 1 次 L1 记忆压缩（记忆分册 §5.1）；
+ * 4. 每拍最多 1 条朋友圈同拍动态（分册 §6.3，无图）。
+ *
+ * 让路规则：出图中整拍停、角色自己作息的睡眠区间内不打扰、全局安静时段不打扰、
+ * 长空闲心跳（默认 2 小时）到期才允许对同一 idle 窗口重复探活。
+ */
+@Singleton
+class LiteProactiveCoordinator @Inject constructor(
+    private val dao: CompanionDao,
+    private val client: OpenAiCompatibleClient,
+    private val cipher: CompanionSecretCipher,
+    private val imageGeneration: ImageGenerationCoordinator,
+    private val notificationPublisher: CompanionNotificationPublisher,
+    private val timeline: CompanionTimelineRecorder,
+    private val repository: CompanionRepository,
+    private val scenePromptCoordinator: ScenePromptCoordinator,
+    private val memoryRollup: com.aster.companion.lite.memory.MemoryRollupCoordinator,
+    private val scenePhotoBus: com.aster.companion.lite.LiteScenePhotoBus,
+    private val backgroundIdle: com.aster.companion.lite.BackgroundIdleStore
+) {
+
+    private val settings = LiteProactiveSettings()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** threadId → 已经探活过的那个 idle 窗口（用当时最后一条消息的时间标识）。 */
+    private val probedIdleWindow = ConcurrentHashMap<String, Long>()
+
+    /** threadId → 上次探活时间；长空闲心跳据此放开重复探活。 */
+    private val probeAtByThread = ConcurrentHashMap<String, Long>()
+
+    /** characterId → 上次自发朋友圈动态的时间。 */
+    private val momentAtByCharacter = ConcurrentHashMap<String, Long>()
+
+    /** characterId → 上次主动出图的时间。 */
+    private val photoAtByCharacter = ConcurrentHashMap<String, Long>()
+
+    /** characterId → 上次真正发出主动消息的时间。 */
+    private val lastProactiveAt = ConcurrentHashMap<String, Long>()
+
+    /** characterId → (本地日期, 当日条数)。 */
+    private val dailyCounter = ConcurrentHashMap<String, Pair<String, Int>>()
+
+    /** 同角色一把锁（分册 §10）。 */
+    private val characterLocks = ConcurrentHashMap<String, Mutex>()
+
+    @Volatile
+    private var running = false
+
+    fun start() {
+        if (!LiteProductConfig.ENABLED || running) return
+        running = true
+        scope.launch {
+            while (true) {
+                runCatching { tick(System.currentTimeMillis()) }
+                delay(TICK_INTERVAL_MS)
+            }
+        }
+    }
+
+    /** 一次调度拍；测试可直接调用。 */
+    suspend fun tick(now: Long, zone: ZoneId = ZoneId.systemDefault()) {
+        if (!LiteProductConfig.ENABLED) return
+        val snapshots = privateThreadSnapshots(now, zone)
+        if (snapshots.isEmpty()) return
+        // 空闲让路：探活（主动陪伴里最吵的一条，每角色两次 LLM 调用）本来就有一道
+        // idleQuietMs 安静窗口（默认 2 分钟），这里把它抬到设置页「后台推演」定的值（默认 5 分钟）；
+        // 设置被关掉（0）时保留原来的 2 分钟默认，恢复旧行为。
+        val configuredIdleMs = backgroundIdle.idleMs.value
+        val effectiveIdleMs =
+            if (configuredIdleMs > 0) configuredIdleMs else settings.idleQuietMs
+        // 分册 §5：最多 4 槽并行探活（两段式每角色占 2 槽）；让路规则都在 planProbes 里。
+        val selected = LiteProactivePolicy.planProbes(
+            snapshots = snapshots,
+            now = now,
+            settings = settings.copy(idleQuietMs = effectiveIdleMs),
+            imageBusy = imageGeneration.isImageLaneBusy(),
+            dailyTotal = dailyTotal(now, zone),
+            zone = zone
+        )
+        if (selected.isNotEmpty()) {
+            val probes = coroutineScope {
+                selected.map { snapshot ->
+                    async {
+                        com.aster.companion.lite.LiteBackgroundLlmGate.withPermit { probe(snapshot, now, zone) }
+                    }
+                }.mapNotNull { it.await() }
+            }
+            // 分册 §5.4：即使多槽都返回正文，每拍真正落库也有上限，多出来的直接丢弃。
+            probes.take(LiteProactivePolicy.persistBudget(probes.size, settings)).forEach { outcome ->
+                when (val reply = outcome.reply) {
+                    is ProbeReply.Text -> persist(outcome.snapshot, reply.body, now, zone)
+                    is ProbeReply.Photo -> runCatching { shareProactivePhoto(outcome.snapshot, reply.intent, now) }
+                }
+            }
+        }
+        // 用户仍在聊（最近 idleQuiet 内有消息）时，不跑记忆压缩/朋友圈文案，避免和聊天抢槽。
+        val userLikelyChatting = snapshots.any { now - it.lastMessageAt < settings.idleQuietMs }
+        if (!userLikelyChatting) {
+            // 记忆分册 §5.1：每拍最多 1 次 L1 压缩，用剩下的槽；出图时 rollUp 自己会让路。
+            snapshots.maxByOrNull { it.lastMessageAt }?.let { freshest ->
+                runCatching {
+                    com.aster.companion.lite.LiteBackgroundLlmGate.withPermit {
+                        memoryRollup.rollUp(freshest.threadId, now)
+                    }
+                }
+            }
+            // 分册 §6.3：每拍最多 1 条朋友圈同拍（无图；配图仍由用户走 Scene 流水线）。
+            runCatching { shareMomentIfDue(snapshots, now, zone) }
+        }
+    }
+
+    private sealed interface ProbeReply {
+        data class Text(val body: String) : ProbeReply
+        data class Photo(val intent: String) : ProbeReply
+    }
+
+    private data class Probe(val snapshot: LiteProactiveThreadSnapshot, val reply: ProbeReply)
+
+    private suspend fun privateThreadSnapshots(now: Long, zone: ZoneId): List<LiteProactiveThreadSnapshot> {
+        val today = dateKey(now, zone)
+        return dao.allThreads()
+            .filter { it.type == ConversationType.PRIVATE }
+            .mapNotNull { thread ->
+                val characterId = dao.participantIds(thread.id).firstOrNull() ?: return@mapNotNull null
+                val lastMessageAt = dao.recentMessages(thread.id, 1).firstOrNull()?.createdAt ?: thread.updatedAt
+                LiteProactiveThreadSnapshot(
+                    threadId = thread.id,
+                    characterId = characterId,
+                    lastMessageAt = lastMessageAt,
+                    lastProactiveAt = lastProactiveAt[characterId] ?: 0L,
+                    todayProactiveCount = dailyCounter[characterId]
+                        ?.takeIf { it.first == today }
+                        ?.second
+                        ?: 0,
+                    active = false,
+                    probedForCurrentIdle = probedIdleWindow[thread.id] == lastMessageAt,
+                    lastProbeAt = probeAtByThread[thread.id] ?: 0L,
+                    sleeping = dao.livingState(characterId)?.sleepUntil?.let { now < it } == true
+                )
+            }
+    }
+
+    /** 单槽探活：只产出结果，不落库；SILENT 或失败返回 null。 */
+    private suspend fun probe(snapshot: LiteProactiveThreadSnapshot, now: Long, zone: ZoneId): Probe? {
+        val lock = characterLocks.getOrPut(snapshot.characterId) { Mutex() }
+        if (lock.isLocked) return null
+        return lock.withLock {
+            // 探活过就记账，避免同一个 idle 窗口被反复打扰（心跳到期除外）。
+            probedIdleWindow[snapshot.threadId] = snapshot.lastMessageAt
+            probeAtByThread[snapshot.threadId] = now
+            val character = dao.character(snapshot.characterId) ?: return@withLock null
+            val profile = dao.modelProfile(AgentTurnCoordinator.CONVERSATION_MODEL) ?: return@withLock null
+            if (!profile.enabled || profile.encryptedApiKey.isNullOrBlank()) return@withLock null
+            val apiKey = cipher.decrypt(requireNotNull(profile.encryptedApiKey))
+            val photoAllowed = !imageGeneration.isImageLaneBusy() && LiteProactiveReplyPolicy.canSendPhoto(
+                lastPhotoAt = photoAtByCharacter[snapshot.characterId] ?: 0L,
+                now = now,
+                settings = settings
+            )
+            val living = dao.livingState(snapshot.characterId)
+            val input = LiteProactivePromptBuilder.Input(
+                characterName = character.name,
+                personalityPrompt = character.personalityPrompt,
+                relationshipPrompt = character.relationshipPrompt,
+                recent = recentBrief(snapshot.threadId),
+                timeOfDay = timeOfDay(now, zone),
+                minutesSinceLastChat = ((now - snapshot.lastMessageAt) / 60_000L).toInt().coerceAtLeast(0),
+                situation = listOfNotNull(
+                    living?.currentActivity?.takeIf { it.isNotBlank() },
+                    living?.mood?.takeIf { it.isNotBlank() }?.let { "心情 $it" }
+                ).joinToString(" · "),
+                photoAllowed = photoAllowed
+            )
+            val reply = runCatching { generateReply(profile, apiKey, input) }.getOrNull() ?: return@withLock null
+            Probe(snapshot, reply)
+        }
+    }
+
+    private suspend fun persist(snapshot: LiteProactiveThreadSnapshot, body: String, now: Long, zone: ZoneId) {
+        val message = MessageEntity(
+            id = UUID.randomUUID().toString(),
+            threadId = snapshot.threadId,
+            characterId = snapshot.characterId,
+            body = body,
+            imageUri = null,
+            fromUser = false,
+            createdAt = System.currentTimeMillis()
+        )
+        dao.insertMessage(message)
+        timeline.recordMessage(message)
+        dao.touchThread(snapshot.threadId, message.createdAt)
+        lastProactiveAt[snapshot.characterId] = message.createdAt
+        val today = dateKey(now, zone)
+        dailyCounter[snapshot.characterId] =
+            today to ((dailyCounter[snapshot.characterId]?.takeIf { it.first == today }?.second ?: 0) + 1)
+        dao.character(snapshot.characterId)?.let { character ->
+            notificationPublisher.publish(character.name, body, snapshot.threadId)
+        }
+    }
+
+    /**
+     * 主动生图（分册 §3 二期的可选行为）：角色的中文意图 → Scene 流水线出英文 tag 串
+     * → 交给图片动作链路按 768 出图；出图期间本拍的其它主动已经让路。
+     */
+    private suspend fun shareProactivePhoto(snapshot: LiteProactiveThreadSnapshot, intent: String, now: Long) {
+        if (!settings.photoEnabled) return
+        if (imageGeneration.isImageLaneBusy()) return
+        val draft = runCatching {
+            scenePromptCoordinator.buildTagPrompt(
+                characterId = snapshot.characterId,
+                intent = intent,
+                recent = recentBrief(snapshot.threadId),
+                useBackgroundGate = true,
+                viewpoint = true,
+                // 她探活时已经自己决定了要拍什么，这里只把她的决定转成 tag，并补一行「为什么」。
+                wantReason = true,
+                shot = com.aster.companion.agent.CharacterPhotoShotPolicy.PhotoShot(shot = intent)
+            )
+        }.getOrNull() ?: return
+        photoAtByCharacter[snapshot.characterId] = now
+        lastProactiveAt[snapshot.characterId] = now
+        // 主动生图也走预览确认，避免用户不知道会生成什么。
+        scenePhotoBus.publish(
+            com.aster.companion.lite.ScenePhotoRequest(
+                threadId = snapshot.threadId,
+                characterId = snapshot.characterId,
+                intent = intent,
+                prompt = draft.prompt,
+                shot = draft.shot,
+                reason = draft.reason,
+                stage = com.aster.companion.lite.ScenePhotoStage.READY,
+                attempts = draft.attempts
+            )
+        )
+    }
+
+    /**
+     * 朋友圈同拍（分册 §6.3）：与探活同拍但最多 1 条，冷却 6 小时；
+     * 只写中文短动态，不生成图——用户想要配图时走 Scene 流水线。
+     */
+    private suspend fun shareMomentIfDue(snapshots: List<LiteProactiveThreadSnapshot>, now: Long, zone: ZoneId) {
+        if (!settings.momentsEnabled) return
+        if (imageGeneration.isImageLaneBusy()) return
+        val candidate = snapshots
+            .filterNot { it.sleeping }
+            .sortedByDescending { it.lastMessageAt }
+            .firstOrNull { snapshot ->
+                val lastAt = momentAtByCharacter[snapshot.characterId] ?: 0L
+                val ok = LiteProactivePolicy.canShareMoment(
+                    lastMomentAt = lastAt,
+                    now = now,
+                    settings = settings,
+                    imageBusy = false,
+                    zone = zone
+                )
+                android.util.Log.d(
+                    "TongpinMoments",
+                    "LITE moment check char=${snapshot.characterId.take(8)} lastAt=$lastAt " +
+                        "sinceMin=${if (lastAt > 0) (now - lastAt) / 60_000L else -1} " +
+                        "cooldownMin=${settings.momentCooldownMs / 60_000L} can=${ok}"
+                )
+                ok
+            } ?: return
+        val lock = characterLocks.getOrPut(candidate.characterId) { Mutex() }
+        if (lock.isLocked) return
+        lock.withLock {
+            val character = dao.character(candidate.characterId) ?: return@withLock
+            val profile = dao.modelProfile(AgentTurnCoordinator.CONVERSATION_MODEL) ?: return@withLock
+            if (!profile.enabled || profile.encryptedApiKey.isNullOrBlank()) return@withLock
+            val apiKey = cipher.decrypt(requireNotNull(profile.encryptedApiKey))
+            val living = dao.livingState(candidate.characterId)
+            val input = LiteProactivePromptBuilder.Input(
+                characterName = character.name,
+                personalityPrompt = character.personalityPrompt,
+                relationshipPrompt = character.relationshipPrompt,
+                recent = recentBrief(candidate.threadId),
+                timeOfDay = timeOfDay(now, zone),
+                minutesSinceLastChat = ((now - candidate.lastMessageAt) / 60_000L).toInt().coerceAtLeast(0),
+                situation = listOfNotNull(
+                    living?.currentActivity?.takeIf { it.isNotBlank() },
+                    living?.mood?.takeIf { it.isNotBlank() }?.let { "心情 $it" }
+                ).joinToString(" · ")
+            )
+            val raw = com.aster.companion.lite.LiteBackgroundLlmGate.withPermit {
+                client.chat(
+                    profile = profile,
+                    apiKey = apiKey,
+                    systemPrompt = LiteProactivePromptBuilder.momentSystem(input),
+                    userPrompt = LiteProactivePromptBuilder.momentUser(input)
+                ).getOrNull()
+            } ?: return@withLock
+            val body = when (val verdict = LiteProactiveReplyPolicy.parse(raw, settings)) {
+                is LiteProactiveReplyPolicy.Verdict.Speak -> verdict.text
+                else -> return@withLock
+            }
+            runCatching {
+                repository.createCharacterMoment(
+                    characterId = character.id,
+                    body = body,
+                    source = MomentActors.SOURCE_PROACTIVE,
+                    status = MomentActors.STATUS_PUBLISHED
+                )
+            }.onSuccess {
+                momentAtByCharacter[character.id] = System.currentTimeMillis()
+                android.util.Log.i("TongpinMoments", "LITE moment POSTED char=${character.id.take(8)} body=${body.take(30)}")
+            }.onFailure {
+                android.util.Log.w("TongpinMoments", "LITE moment failed", it)
+            }
+        }
+    }
+
+    /** 两段式：先要一行内心，再据此决定说、发照片还是 SILENT。任何一段失败都当作本次安静。 */
+    private suspend fun generateReply(
+        profile: com.aster.companion.data.ModelProfileEntity,
+        apiKey: String,
+        input: LiteProactivePromptBuilder.Input
+    ): ProbeReply? {
+        val inner = if (settings.twoStage) {
+            client.chat(
+                profile = profile,
+                apiKey = apiKey,
+                systemPrompt = LiteProactivePromptBuilder.innerSystem(input),
+                userPrompt = "只输出那一行 ≤15 字中文。"
+            ).getOrNull()?.trim()?.lines()?.firstOrNull { it.isNotBlank() }?.take(30).orEmpty()
+        } else ""
+        val system = LiteProactivePromptBuilder.system(input)
+        val user = LiteProactivePromptBuilder.user(input.copy(inner = inner))
+        val raw = client.chat(profile, apiKey, system, user).getOrElse { return null }
+        return when (val verdict = LiteProactiveReplyPolicy.parse(raw, settings)) {
+            is LiteProactiveReplyPolicy.Verdict.Speak -> ProbeReply.Text(verdict.text)
+            is LiteProactiveReplyPolicy.Verdict.Photo ->
+                if (input.photoAllowed) ProbeReply.Photo(verdict.intent) else null
+            else -> null
+        }
+    }
+
+    private suspend fun recentBrief(threadId: String): List<String> = dao.recentMessages(threadId, RECENT_LIMIT)
+        .asReversed()
+        .mapNotNull { message ->
+            val body = message.body.trim().replace(WHITESPACE, " ")
+            if (body.isEmpty() || body.startsWith("stream:")) return@mapNotNull null
+            if (message.fromUser) "User: ${body.take(40)}"
+            else "${dao.character(message.characterId.orEmpty())?.name ?: "角色"}: ${body.take(40)}"
+        }
+
+    private fun dailyTotal(now: Long, zone: ZoneId): Int {
+        val today = dateKey(now, zone)
+        return dailyCounter.values.count { it.first == today }
+    }
+
+    private fun dateKey(now: Long, zone: ZoneId): String =
+        Instant.ofEpochMilli(now).atZone(zone).toLocalDate().toString()
+
+    private fun timeOfDay(now: Long, zone: ZoneId): String {
+        val hour = Instant.ofEpochMilli(now).atZone(zone).hour
+        return when {
+            hour in 5..8 -> "清晨"
+            hour in 9..11 -> "上午"
+            hour in 12..13 -> "中午"
+            hour in 14..17 -> "下午"
+            hour in 18..22 -> "晚上"
+            else -> "深夜"
+        }
+    }
+
+    private companion object {
+        const val TICK_INTERVAL_MS = 15_000L
+        const val RECENT_LIMIT = 4
+        val WHITESPACE = Regex("\\s+")
+    }
+}

@@ -1,0 +1,28 @@
+package com.aster.ui
+
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class GroupImageConsentPresentationTest {
+    @Test
+    fun `describes selected characters and separate mode`() {
+        assertEquals(
+            "林见夏、岚分别发自己的照片",
+            GroupImageConsentPresentation.summary(
+                mode = "SEPARATE",
+                participantNames = listOf("林见夏", "岚")
+            )
+        )
+    }
+
+    @Test
+    fun `describes one character without implying a group photo`() {
+        assertEquals(
+            "林见夏发一张自己的照片",
+            GroupImageConsentPresentation.summary(
+                mode = "SINGLE",
+                participantNames = listOf("林见夏")
+            )
+        )
+    }
+}

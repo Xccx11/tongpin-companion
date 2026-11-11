@@ -1,0 +1,28 @@
+package com.aster.companion.domain
+
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class ComfyImageDeliveryPolicyTest {
+    @Test
+    fun `resumes polling after a Comfy prompt was accepted instead of submitting a second image job`() {
+        val next = ComfyImageDeliveryPolicy.nextStep(
+            promptId = "prompt-123",
+            outputUrl = null,
+            localImageUri = null
+        )
+
+        assertEquals(ComfyImageDeliveryStep.POLL_OUTPUT, next)
+    }
+
+    @Test
+    fun `uses the already produced output before asking ComfyUI for another image`() {
+        val next = ComfyImageDeliveryPolicy.nextStep(
+            promptId = "prompt-123",
+            outputUrl = "http://192.168.2.18:8188/view?filename=photo.png",
+            localImageUri = null
+        )
+
+        assertEquals(ComfyImageDeliveryStep.DOWNLOAD_OUTPUT, next)
+    }
+}

@@ -1,0 +1,171 @@
+package com.aster.companion.agent
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * 外貌档案的样板清洗。
+ *
+ * 最要紧的一条：[实测档案] —— 这是线上真实那份被粘进了整段出图提示词的档案，
+ * 它曾经让最终提示词里出现「锚点写 standing / 场景写 lying on a bed」的物理矛盾，
+ * 还把 `natural lighting` 带进了明令不许写光的提示词。
+ */
+class AppearanceAnchorScrubPolicyTest {
+
+    /**
+     * 线上真实的外貌档案（原文照抄，只把超长部分保留）。
+     *
+     * 它开头是 `A photorealistic smartphone full-body photo…` —— 这是**一张图的提示词**，
+     * 不是长相描述；结尾 `She is standing in a full-body pose, visible from head to toe,
+     * natural lighting, clear and detailed.` 是姿态 + 构图 + 光线。
+     */
+    private val 实测档案 = "A photorealistic smartphone full-body photo, high-definition realistic skin " +
+        "texture, fine pores, natural skin tone transitions, clear and natural. From head to toe: " +
+        "A 22-year-old East Asian young woman has long black hair, soft with natural slight waves, " +
+        "many fine strands falling naturally, and light airy bangs. She has an oval face, a refined " +
+        "sharp chin, and a clear jawline. Her eyes are large, deep dark brown, with slightly upturned " +
+        "outer corners and long thick eyelashes. Her nose is small and straight. Her skin is fair, " +
+        "translucent, delicate, smooth, and has a healthy radiant glow. She wears a cool refined " +
+        "no-makeup makeup look: light blush, clear foundation, natural sharp eye makeup, and soft " +
+        "rosy lips. She has a slender neck, soft shoulders, huge breasts, a slender long waist, " +
+        "full hips, long legs, and delicate feet. She is standing in a full-body pose, visible from " +
+        "head to toe, natural lighting, clear and detailed."
+
+    @Test
+    fun `实测档案里的光线词被剥掉`() {
+        val out = AppearanceAnchorScrubPolicy.scrub(实测档案).text
+
+        assertFalse("规则明令整段不许出现光线，锚点却一直在带", out.contains("natural lighting"))
+    }
+
+    @Test
+    fun `实测档案里的画幅构图与画质样板被剥掉`() {
+        val out = AppearanceAnchorScrubPolicy.scrub(实测档案).text
+
+        assertFalse(out.contains("full-body photo"))
+        assertFalse(out.contains("high-definition"))
+        assertFalse(out.contains("From head to toe"))
+        assertFalse(out.contains("visible from head to toe"))
+        assertFalse(out.contains("clear and detailed"))
+        assertFalse(out.contains("clear and natural"))
+    }
+
+    @Test
+    fun `实测档案里的姿态子句被剥掉——它会和场景打架`() {
+        val out = AppearanceAnchorScrubPolicy.scrub(实测档案).text
+
+        assertFalse("锚点写 standing、场景写 lying on a bed，必须先删掉这句", out.contains("standing"))
+        assertFalse(out.contains("full-body pose"))
+    }
+
+    @Test
+    fun `五官与身材一个都不能丢`() {
+        val out = AppearanceAnchorScrubPolicy.scrub(实测档案).text
+
+        assertTrue(out.contains("oval face"))
+        assertTrue(out.contains("refined sharp chin"))
+        assertTrue(out.contains("clear jawline"))
+        assertTrue(out.contains("deep dark brown"))
+        assertTrue(out.contains("long black hair"))
+        assertTrue(out.contains("long thick eyelashes"))
+        assertTrue(out.contains("small and straight"))
+        assertTrue(out.contains("slender neck"))
+        assertTrue(out.contains("huge breasts"))
+        assertTrue(out.contains("full hips"))
+        assertTrue(out.contains("delicate feet"))
+        assertTrue(out.contains("clear foundation"))
+    }
+
+    /** 删词不该留下孤零零的冠词（`A photorealistic …` 被删成 `A, realistic …` 就是垃圾）。 */
+    @Test
+    fun `开头不会留下孤立的冠词`() {
+        val out = AppearanceAnchorScrubPolicy.scrub(实测档案).text
+
+        assertFalse("实际开头=「${out.take(30)}」", out.startsWith("A,"))
+        assertFalse(out.startsWith("A "))
+        assertTrue(out.startsWith("realistic skin texture"))
+    }
+
+    /** 用户明确要求：**年龄不动**（它是长相的一部分，不是样板）。 */
+    @Test
+    fun `年龄必须原样保留`() {
+        val out = AppearanceAnchorScrubPolicy.scrub(实测档案).text
+
+        assertTrue(out.contains("22-year-old"))
+    }
+
+    @Test
+    fun `清洗会报告改了什么，便于界面与日志核对`() {
+        val result = AppearanceAnchorScrubPolicy.scrub(实测档案)
+
+        assertTrue(result.notes.any { it.contains("光线") })
+        assertTrue(result.notes.any { it.contains("画幅") || it.contains("构图") })
+        assertTrue(result.notes.any { it.contains("姿态") })
+    }
+
+    @Test
+    fun `干净的长相档案原样保留`() {
+        val clean = "一位22岁左右的东亚少女，鹅蛋脸，淡淡的腮红，淡润微红唇。"
+
+        val result = AppearanceAnchorScrubPolicy.scrub(clean)
+
+        assertEquals(clean, result.text)
+        assertTrue(result.notes.isEmpty())
+    }
+
+    @Test
+    fun `英文长相档案里的五官词一个不动`() {
+        val clean = "A young East Asian woman, oval face, deep brown almond eyes, long black hair"
+
+        val result = AppearanceAnchorScrubPolicy.scrub(clean)
+
+        assertEquals(clean, result.text)
+    }
+
+    @Test
+    fun `空档案与空白档案都给空串`() {
+        assertEquals("", AppearanceAnchorScrubPolicy.scrub("").text)
+        assertEquals("", AppearanceAnchorScrubPolicy.scrub("   ").text)
+    }
+
+    @Test
+    fun `全是样板时清完为空，不会留下标点垃圾`() {
+        val result = AppearanceAnchorScrubPolicy.scrub(
+            "A photorealistic smartphone full-body photo, from head to toe, natural lighting, clear and detailed."
+        )
+
+        assertTrue("清完应该是空的或只剩空白，实际=「${result.text}」", result.text.isBlank())
+    }
+
+    @Test
+    fun `清洗是幂等的`() {
+        val once = AppearanceAnchorScrubPolicy.scrub(实测档案).text
+
+        assertEquals(once, AppearanceAnchorScrubPolicy.scrub(once).text)
+    }
+
+    /** 清洗之后仍然由 `AppearanceAnchor` 拼在最前面，且拼法没变。 */
+    @Test
+    fun `拼进提示词的是清洗后的档案，位置仍在最前`() {
+        val scene = "She lies on a messy bed, her body limp and exhausted."
+
+        val composed = AppearanceAnchor.attach(scene, 实测档案, ScenePromptFormat.ENGLISH_NATURAL)
+
+        assertTrue("锚点必须仍在最前面", composed.startsWith(AppearanceAnchorScrubPolicy.scrub(实测档案).text))
+        assertTrue(composed.endsWith(scene))
+        assertFalse("锚点里的光线词不能进最终提示词", composed.contains("natural lighting"))
+        assertFalse(composed.contains("standing"))
+        assertTrue(composed.contains("22-year-old"))
+    }
+
+    /** 反向剥离也要成立：`strip` 拿的是**未清洗**的档案，也必须能剥掉清洗后拼上去的那一份。 */
+    @Test
+    fun `strip 用未清洗的档案也能剥掉清洗后的锚点`() {
+        val scene = "She lies on a messy bed."
+        val composed = AppearanceAnchor.attach(scene, 实测档案, ScenePromptFormat.ENGLISH_NATURAL)
+
+        assertEquals(scene, AppearanceAnchor.strip(composed, 实测档案))
+    }
+}

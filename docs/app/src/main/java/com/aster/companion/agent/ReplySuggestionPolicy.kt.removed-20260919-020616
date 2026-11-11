@@ -1,0 +1,99 @@
+package com.aster.companion.agent
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
+/**
+ * 「推荐回复」：她每回复完一条，后台替**用户**准备两句可以直接发出去的话。
+ *
+ * - [advance] 推进：主动往前推（提议做什么、要约、要东西、撩、答应、追问）。
+ * - [holdBack] 收住：冷、收、退（拒绝、敷衍、回避、转移话题、说在忙或要睡了）。
+ *
+ * 注意这是**用户要说的话**，不是角色说的话——提示词里专门强调了这一点。
+ */
+data class ReplySuggestion(val advance: String, val holdBack: String)
+
+/** 界面用：这两条建议属于哪个会话。切了会话就不该再显示。 */
+data class ThreadReplySuggestions(val threadId: String, val suggestion: ReplySuggestion)
+
+/**
+ * 推荐回复的纯逻辑：拼提示词、解析模型输出、校验。不碰数据库、不发网络请求，所以可直接单测。
+ *
+ * 校验刻意严格：任何一项不合格（空、超长、两条相同、JSON 解析失败）都返回 null，
+ * 界面就什么都不显示。**宁可没有建议，也不要显示半成品。**
+ */
+object ReplySuggestionPolicy {
+    /** 每条建议的字数上限。超了说明模型在写小作文，整批丢弃。 */
+    const val MAX_CHARS = 30
+
+    /** 拼进提示词的最近消息条数：够看出上下文，又不至于把上下文撑爆。 */
+    const val HISTORY_LIMIT = 10
+
+    /** 远程可覆盖的 system 提示词 key —— 改口吻不用重装 App。 */
+    const val REMOTE_KEY = "chat.replySuggestions"
+
+    /** 远程 key 缺席时的兜底，内容与 `prompts/chat.json` 里那份保持一致。 */
+    val DEFAULT_SYSTEM = """
+        你是「推荐回复」参谋：看用户和他的角色最近的聊天，替**用户**想两条可以直接发出去的话。
+
+        只输出一个 JSON 对象，不要任何多余文字、不要 markdown 代码块：
+        {"advance":"...","holdback":"..."}
+
+        - advance（推进）：主动往前推。提议做什么、要约、要东西、撩、答应、追问。
+        - holdback（收住）：冷、收、退。拒绝、敷衍、回避、转移话题、说在忙或要睡了。不是骂人，是没那个兴致。
+
+        硬性要求：
+        1. 两条都是**用户**要发的第一人称口语，像真人发微信。不是旁白、不是角色说的话、不要括号动作。
+        2. 每条不超过 20 个中文字。
+        3. 两条必须是**两个不同走向**，不能是同一件事的两种说法。
+        4. 接着最近正在聊的事说，不要另起话题、不要编造没发生过的事。
+        5. 拿不准就写得平实，不要夸张、不要书面语。
+    """.trimIndent()
+
+    fun systemPrompt(remote: String?): String =
+        remote?.takeIf { it.isNotBlank() } ?: DEFAULT_SYSTEM
+
+    /** history 用 (是否用户发的, 正文) 表示，由调用方从库里取。 */
+    fun userPrompt(characterName: String, history: List<Pair<Boolean, String>>): String = buildString {
+        val name = characterName.trim().ifBlank { "她" }
+        appendLine("角色叫「$name」。下面是你们最近的对话（「用户」= 你）：")
+        history.forEach { (fromUser, body) ->
+            val oneLine = body.trim().replace(Regex("\\s+"), " ").take(120)
+            appendLine("- ${if (fromUser) "用户" else name}：$oneLine")
+        }
+        appendLine()
+        appendLine("现在替用户想两条可以直接发出去的话，只输出那个 JSON。")
+    }
+
+    /** 解析模型输出；任何不合格都返回 null。 */
+    fun parse(raw: String): ReplySuggestion? {
+        val text = stripFence(raw)
+        val start = text.indexOf('{')
+        val end = text.lastIndexOf('}')
+        if (start < 0 || end <= start) return null
+        val obj = runCatching {
+            Json.parseToJsonElement(text.substring(start, end + 1)).jsonObject
+        }.getOrNull() ?: return null
+        val advance = runCatching { obj["advance"]?.jsonPrimitive?.content }.getOrNull().orEmpty()
+        val holdBack = runCatching { obj["holdback"]?.jsonPrimitive?.content }.getOrNull().orEmpty()
+        return normalize(advance, holdBack)
+    }
+
+    /** 空 / 超长 / 两条一样 —— 任一不合格就整批丢掉。 */
+    fun normalize(advance: String, holdBack: String): ReplySuggestion? {
+        val a = advance.trim()
+        val h = holdBack.trim()
+        if (a.isEmpty() || h.isEmpty()) return null
+        if (a.length > MAX_CHARS || h.length > MAX_CHARS) return null
+        if (a == h) return null
+        return ReplySuggestion(a, h)
+    }
+
+    /** 模型偶尔会用 ```json 包一层，先剥掉再找 JSON。 */
+    private fun stripFence(raw: String): String {
+        val text = raw.trim()
+        if (!text.startsWith("```")) return text
+        return text.substringAfter('\n', "").substringBeforeLast("```").trim()
+    }
+}

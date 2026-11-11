@@ -1,0 +1,87 @@
+{
+  "4": {
+    "inputs": { "ckpt_name": "Illustrious-XL-v2.0.safetensors" },
+    "class_type": "CheckpointLoaderSimple"
+  },
+  "435": {
+    "inputs": { "value": "" },
+    "class_type": "PrimitiveStringMultiline"
+  },
+  "7": {
+    "inputs": { "text": ["435", 0], "clip": ["4", 1] },
+    "class_type": "CLIPTextEncode"
+  },
+  "6": {
+    "inputs": {
+      "text": "lowres, blurry, bad anatomy, extra arms, extra hands, extra fingers, malformed hands, duplicate person, text, watermark",
+      "clip": ["4", 1]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "78": {
+    "inputs": { "image": "tongpin-reference.png" },
+    "class_type": "LoadImage"
+  },
+  "79": {
+    "inputs": { "image": "tongpin-style-reference.png" },
+    "class_type": "LoadImage"
+  },
+  "80": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "width": 768,
+      "height": 1024,
+      "crop": "center",
+      "image": ["78", 0]
+    },
+    "class_type": "ImageScale"
+  },
+  "10": {
+    "inputs": { "pixels": ["80", 0], "vae": ["4", 2] },
+    "class_type": "VAEEncode"
+  },
+  "94": {
+    "inputs": {
+      "model": ["4", 0],
+      "preset": "STANDARD (medium strength)"
+    },
+    "class_type": "IPAdapterUnifiedLoader"
+  },
+  "95": {
+    "inputs": {
+      "model": ["94", 0],
+      "ipadapter": ["94", 1],
+      "image": ["79", 0],
+      "weight": 0.65,
+      "weight_type": "style transfer",
+      "combine_embeds": "concat",
+      "start_at": 0.0,
+      "end_at": 1.0,
+      "embeds_scaling": "V only"
+    },
+    "class_type": "IPAdapterAdvanced"
+  },
+  "3": {
+    "inputs": {
+      "seed": 0,
+      "steps": 26,
+      "cfg": 5.0,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "karras",
+      "denoise": 0.48,
+      "model": ["95", 0],
+      "positive": ["7", 0],
+      "negative": ["6", 0],
+      "latent_image": ["10", 0]
+    },
+    "class_type": "KSampler"
+  },
+  "8": {
+    "inputs": { "samples": ["3", 0], "vae": ["4", 2] },
+    "class_type": "VAEDecode"
+  },
+  "60": {
+    "inputs": { "filename_prefix": "Tongpin_Illustrious", "images": ["8", 0] },
+    "class_type": "SaveImage"
+  }
+}

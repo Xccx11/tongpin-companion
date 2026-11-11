@@ -1,0 +1,93 @@
+package com.aster.companion.agent
+
+import com.aster.companion.data.CompanionDao
+import com.aster.companion.data.ThreadSummaryEntity
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * 对话摘要：窗口外的旧消息压缩成摘要存 thread_summaries，对话只带摘要 + 窗口内消息，省 token。
+ */
+@Singleton
+class ConversationSummarizer @Inject constructor(
+    private val dao: CompanionDao,
+    private val client: OpenAiCompatibleClient,
+    private val secretCipher: com.aster.companion.data.CompanionSecretCipher
+) {
+    companion object {
+        /** 超过该消息数才触发总结（省 token：每 40 条总结一次）。 */
+        const val TRIGGER_MESSAGE_COUNT = 40
+        /** 摘要最大长度（滚动压缩后恒定，token 不随对话增长）。 */
+        const val SUMMARY_MAX_CHARS = 300
+        /** 每次总结最早的旧消息条数（窗口外部分）。 */
+        const val BATCH_SIZE = 40
+        /** 窗口内保留的消息条数。 */
+        const val WINDOW_SIZE = 30
+    }
+
+    /**
+     * 滚动压缩：旧摘要 + 新 40 条 → 重压成 ≤300 字的新摘要（替换旧的），token 恒定不随对话增长。
+     * 返回新摘要文本（调用方可用它追加一条记忆记录），无总结时返回 null。
+     */
+    suspend fun summarizeIfNeeded(threadId: String): String? {
+        val existing = dao.threadSummary(threadId)
+        val cutoff = existing?.updatedAt ?: 0L
+        val oldMessages = dao.recentMessages(threadId, 500)
+            .asReversed()
+            .filter { it.createdAt > cutoff }
+            .filter { !it.id.startsWith("stream:") }
+        if (oldMessages.size < TRIGGER_MESSAGE_COUNT) return null
+        val batch = oldMessages.take(BATCH_SIZE)
+        val speakers = batch.associate { message -> message.characterId.orEmpty() to (dao.character(message.characterId.orEmpty())?.name ?: "角色") }
+        val transcript = batch.joinToString("\n") { message ->
+            val speaker = if (message.fromUser) "用户" else (speakers[message.characterId.orEmpty()] ?: "角色")
+            "$speaker：${message.body.take(120)}"
+        }
+        val profile = dao.modelProfile(AgentTurnCoordinator.CONVERSATION_MODEL)
+            ?.takeIf { it.enabled && !it.encryptedApiKey.isNullOrBlank() }
+            ?: return null
+        val previousSummary = existing?.summary?.takeIf { it.isNotBlank() }
+        val input = buildString {
+            previousSummary?.let { appendLine("（之前你们已经聊过的内容，摘要：）$it") }
+            appendLine("（接下来这段是新增对话，请与之前摘要合并压缩）")
+            append(transcript)
+        }
+        val summary = client.chat(
+            profile = profile,
+            apiKey = secretCipher.decrypt(requireNotNull(profile.encryptedApiKey)),
+            systemPrompt = "把下面内容压缩成 300 字以内的中文记忆摘要。保留：重要事实、约定、关系进展、角色说过的重要话、用户的重要信息。之前摘要是已压缩过的记忆，新对话里有新的重要信息时合并进去（重复的不再写）；新增信息不多时直接沿用之前的摘要内容。只输出压缩后的摘要本身，不要分段说明。",
+            userPrompt = input
+        ).getOrNull()?.trim()?.takeIf { it.length >= 20 }
+            ?: return null
+        val finalSummary = summary.take(300)
+        dao.upsertThreadSummary(
+            ThreadSummaryEntity(
+                threadId = threadId,
+                role = "",
+                summary = finalSummary,
+                summarizedUpToMessageId = batch.last().id,
+                updatedAt = batch.last().createdAt
+            )
+        )
+        return finalSummary
+    }
+
+    /** 读线程摘要（供对话注入）。 */
+    suspend fun summaryFor(threadId: String): String =
+        dao.threadSummary(threadId)?.summary.orEmpty()
+
+    /** 直接总结一段对话文本，作为角色的状态上下文（不存 thread_summaries）。 */
+    suspend fun summarizeTranscript(transcript: String, currentActivity: String?): String {
+        if (transcript.isBlank()) return ""
+        val profile = dao.modelProfile(AgentTurnCoordinator.CONVERSATION_MODEL)
+            ?.takeIf { it.enabled && !it.encryptedApiKey.isNullOrBlank() }
+            ?: return ""
+        val stateHint = currentActivity?.takeIf(String::isNotBlank)?.let { "她此刻正在：$it。" } ?: ""
+        return client.chat(
+            profile = profile,
+            apiKey = secretCipher.decrypt(requireNotNull(profile.encryptedApiKey)),
+            systemPrompt = "把下面这段角色对话总结成 120 字以内的中文要点。$stateHint 总结要结合：用户说了什么（状态/需求/情绪）、你们聊了什么、有什么约定或进行中的事——这些是角色现在应该知道并融入状态的。只输出总结本身。",
+            userPrompt = transcript
+        ).getOrNull()?.trim()?.takeIf { it.length >= 15 } ?: ""
+    }
+}

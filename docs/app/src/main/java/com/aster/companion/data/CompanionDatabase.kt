@@ -1,0 +1,264 @@
+package com.aster.companion.data
+
+import androidx.room.Database
+import androidx.room.RoomDatabase
+import androidx.room.TypeConverters
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+
+@Database(
+    entities = [CharacterEntity::class, ThreadEntity::class, ThreadParticipantEntity::class, MessageEntity::class, MemoryEntity::class, DiaryPhotoEntity::class, MomentPostEntity::class, MomentMediaEntity::class, MomentReactionEntity::class, MomentCommentEntity::class, EventEntity::class, EventRecipientEntity::class, AgentTurnEntity::class, ActionAuditEntity::class, PendingActionEntity::class, ModelProfileEntity::class, ImageApiPoolEntity::class, SnapshotManifestEntity::class, TimelineEventEntity::class, WorldStateEntity::class, SemanticMemoryEntity::class, DurableTaskEntity::class, AgentRunEntity::class, FamilyGroupFactEntity::class, GroupMemberStateEntity::class, GroupSettingsEntity::class, GroupPrivateFollowUpUseEntity::class, GroupDerivedMemoryLinkEntity::class, CharacterLivingStateEntity::class, ThreadSummaryEntity::class, CharacterLifeStateEntity::class, RelationshipEntity::class, InteractionRequestEntity::class, ActivityEntity::class, CharacterPersonalityEntity::class, CharacterGoalEntity::class, DecisionChainEntity::class, WorldStateRowEntity::class, FutureTimelineEntity::class, WorldEventEntity::class, WorldUserStateEntity::class, WorldLocationEntity::class, WorldTimelineEventEntity::class, MemoryEvidenceEntity::class],
+    version = 32,
+    exportSchema = true
+)
+@TypeConverters(CompanionConverters::class)
+abstract class CompanionDatabase : RoomDatabase() {
+    abstract fun companionDao(): CompanionDao
+
+    companion object {
+        /**
+         * v32：记忆的**重要度 / 可信度**落列 + 新增**证据角色**表。
+         *
+         * - `companion_memories` 加 `importance` / `confidence`：默认 `0` 表示"未标注"，
+         *   读侧会退回"按 kind 推重要度 + 中性可信度"，所以**老数据语义不变**；
+         * - `companion_memory_evidence`：一条事实可以有多条证据（不同来源、不同时刻），
+         *   记录 mode（亲眼看到 / 别人转述 / 她以为 / 已确认…）、holder 与逐字引用。
+         *
+         * 建表语句与 Room 导出的 `32.json` 逐字段核对过（类型 / 非空 / 主键一致）；
+         * Room 只在实体显式声明 `@ColumnInfo(defaultValue=…)` 时才比对默认值，所以
+         * `NOT NULL DEFAULT 0` 不会被判不一致（26_27 / 30_31 也是同样写法且已在真机跑过）。
+         */
+        val MIGRATION_31_32 = object : Migration(31, 32) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE companion_memories ADD COLUMN confidence REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_memory_evidence (id TEXT NOT NULL, memoryId TEXT NOT NULL, mode TEXT NOT NULL, holderCharacterId TEXT, clauseText TEXT NOT NULL, sourceMessageId TEXT, createdAt INTEGER NOT NULL, PRIMARY KEY(id))")
+            }
+        }
+
+        val MIGRATION_27_28 = object : Migration(27, 28) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_threads ADD COLUMN memorySince INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        val MIGRATION_28_29 = object : Migration(28, 29) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_model_profiles ADD COLUMN imageProtocol TEXT NOT NULL DEFAULT 'AUTO'")
+                db.execSQL("ALTER TABLE companion_image_api_pool ADD COLUMN imageProtocol TEXT NOT NULL DEFAULT 'AUTO'")
+                db.execSQL("UPDATE companion_model_profiles SET imageProtocol = 'COMFY_GATEWAY_TASK' WHERE lower(modelName) = 'wai-illustrious-v1'")
+                db.execSQL("UPDATE companion_model_profiles SET imageProtocol = 'COMFY_UI' WHERE lower(modelName) IN ('comfyui-qwen-image-edit-2509', 'comfyui-illustrious-xl-v2-reference')")
+                db.execSQL("UPDATE companion_image_api_pool SET imageProtocol = 'COMFY_GATEWAY_TASK' WHERE lower(modelName) = 'wai-illustrious-v1'")
+            }
+        }
+
+        /** 「这条状态从哪来」：胶囊展开时显示依据（她的原话 / 自主生活）。老数据留空。 */
+        val MIGRATION_29_30 = object : Migration(29, 30) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_character_living_states ADD COLUMN evidence TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        /**
+         * 会话记忆改版：`companion_thread_summaries` 从「散文摘要」升级成「结构化状态」，
+         * 并且要能记录失败（不再静默丢记忆）。
+         *
+         * 注意 `last_updated_msg_id` 一类的"消息序号"在 App 里是 **UUID 字符串**，不是自增整数——
+         * 水位沿用已有的 `summarizedUpToMessageId`(TEXT)，不新建 INTEGER 列。
+         */
+        val MIGRATION_30_31 = object : Migration(30, 31) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_thread_summaries ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE companion_thread_summaries ADD COLUMN failureCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE companion_thread_summaries ADD COLUMN lastError TEXT")
+                db.execSQL("ALTER TABLE companion_thread_summaries ADD COLUMN lastAttemptAt INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        val MIGRATION_26_27 = object : Migration(26, 27) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_world_state ADD COLUMN timePhase TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE companion_world_state ADD COLUMN environment TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE companion_world_state ADD COLUMN variablesJson TEXT NOT NULL DEFAULT '{}'")
+                db.execSQL("ALTER TABLE companion_world_state ADD COLUMN lastAdvancedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE companion_world_state ADD COLUMN lastPlanAttemptAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE companion_world_state ADD COLUMN planRetryAfter INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE companion_world_state ADD COLUMN worldVersion INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE companion_character_living_states ADD COLUMN locationId TEXT NOT NULL DEFAULT 'home.unknown'")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_world_user_state (id TEXT NOT NULL, locationId TEXT NOT NULL, visibility TEXT NOT NULL, lastAction TEXT NOT NULL, lastActionAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_world_locations (id TEXT NOT NULL, displayName TEXT NOT NULL, parentId TEXT, metadataJson TEXT NOT NULL DEFAULT '{}', createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_world_timeline_events (id TEXT NOT NULL, timelineId TEXT NOT NULL, scheduledAt INTEGER NOT NULL, latestStartAt INTEGER NOT NULL, durationMinutes INTEGER NOT NULL, type TEXT NOT NULL, initiatorCharacterId TEXT, requiredCharacterIdsJson TEXT NOT NULL, optionalCharacterIdsJson TEXT NOT NULL, userParticipation TEXT NOT NULL, locationId TEXT NOT NULL, description TEXT NOT NULL, prerequisiteEventIdsJson TEXT NOT NULL, prerequisiteJson TEXT NOT NULL, expectedEffectsJson TEXT NOT NULL, flexibility TEXT NOT NULL, interruptStrategy TEXT NOT NULL, status TEXT NOT NULL, decisionJson TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_world_timeline_events_timelineId ON companion_world_timeline_events(timelineId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_world_timeline_events_scheduledAt ON companion_world_timeline_events(scheduledAt)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_world_timeline_events_status ON companion_world_timeline_events(status)")
+            }
+        }
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_pending_actions (id TEXT NOT NULL, eventId TEXT, threadId TEXT, capabilityId TEXT NOT NULL, transport TEXT NOT NULL, argumentsJson TEXT NOT NULL, state TEXT NOT NULL, createdAt INTEGER NOT NULL, resolvedAt INTEGER, resultSummary TEXT, PRIMARY KEY(id))")
+            }
+        }
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_event_recipients (eventId TEXT NOT NULL, characterId TEXT NOT NULL, state TEXT NOT NULL, deferUntil INTEGER, completedAt INTEGER, PRIMARY KEY(eventId, characterId))")
+            }
+        }
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_characters ADD COLUMN avatarUri TEXT")
+            }
+        }
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_messages ADD COLUMN readAt INTEGER")
+                db.execSQL("UPDATE companion_messages SET readAt = createdAt")
+            }
+        }
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_threads ADD COLUMN contextVersion INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_diary_photos (id TEXT NOT NULL, characterId TEXT NOT NULL, threadId TEXT NOT NULL, imageUri TEXT NOT NULL, createdAt INTEGER NOT NULL, PRIMARY KEY(id))")
+            }
+        }
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_image_api_pool (id TEXT NOT NULL, label TEXT NOT NULL, baseUrl TEXT NOT NULL, modelName TEXT NOT NULL, encryptedApiKey TEXT NOT NULL, enabled INTEGER NOT NULL, createdAt INTEGER NOT NULL, PRIMARY KEY(id))")
+            }
+        }
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_snapshot_manifests (id TEXT NOT NULL, reason TEXT NOT NULL, createdAt INTEGER NOT NULL, databaseFileName TEXT NOT NULL, byteSize INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_timeline_events (id TEXT NOT NULL, threadId TEXT, characterId TEXT, source TEXT NOT NULL, sensitiveLevel TEXT NOT NULL, summary TEXT NOT NULL, payloadJson TEXT, occurredAt INTEGER NOT NULL, createdAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_world_states (id TEXT NOT NULL, characterId TEXT, threadId TEXT, scope TEXT NOT NULL, content TEXT NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_semantic_memories (id TEXT NOT NULL, characterId TEXT, threadId TEXT, timelineEventId TEXT, content TEXT NOT NULL, embedding BLOB, importance INTEGER NOT NULL, retrievable INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_durable_tasks (id TEXT NOT NULL, type TEXT NOT NULL, threadId TEXT, characterId TEXT, payloadJson TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, nextRunAt INTEGER NOT NULL, startedAt INTEGER, completedAt INTEGER, errorSummary TEXT, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_agent_runs (id TEXT NOT NULL, triggerType TEXT NOT NULL, threadId TEXT, characterId TEXT, timelineEventId TEXT, state TEXT NOT NULL, planJson TEXT, resultJson TEXT, createdAt INTEGER NOT NULL, completedAt INTEGER, PRIMARY KEY(id))")
+            }
+        }
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_characters ADD COLUMN styleReferenceImageUri TEXT")
+            }
+        }
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_moment_posts (id TEXT NOT NULL, authorType TEXT NOT NULL, authorCharacterId TEXT, body TEXT NOT NULL, visibility TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_moment_posts_createdAt ON companion_moment_posts(createdAt)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_moment_posts_authorCharacterId ON companion_moment_posts(authorCharacterId)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_moment_media (postId TEXT NOT NULL, ordinal INTEGER NOT NULL, imageUri TEXT NOT NULL, source TEXT NOT NULL, PRIMARY KEY(postId, ordinal))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_moment_media_postId ON companion_moment_media(postId)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_moment_reactions (postId TEXT NOT NULL, actorType TEXT NOT NULL, actorId TEXT NOT NULL, kind TEXT NOT NULL, createdAt INTEGER NOT NULL, PRIMARY KEY(postId, actorType, actorId))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_moment_reactions_postId ON companion_moment_reactions(postId)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_moment_comments (id TEXT NOT NULL, postId TEXT NOT NULL, authorType TEXT NOT NULL, authorCharacterId TEXT, body TEXT NOT NULL, replyToCommentId TEXT, createdAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_moment_comments_postId ON companion_moment_comments(postId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_moment_comments_createdAt ON companion_moment_comments(createdAt)")
+            }
+        }
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_model_profiles ADD COLUMN temperature REAL NOT NULL DEFAULT 0.75")
+            }
+        }
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_model_profiles ADD COLUMN thinkingEnabled INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE companion_model_profiles ADD COLUMN reasoningEffort TEXT NOT NULL DEFAULT 'medium'")
+            }
+        }
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_family_group_facts (id TEXT NOT NULL, groupThreadId TEXT NOT NULL, ownerCharacterId TEXT, summary TEXT NOT NULL, sourceThreadId TEXT NOT NULL, sourceKind TEXT NOT NULL, createdAt INTEGER NOT NULL, expiresAt INTEGER, sensitivity TEXT NOT NULL, allowedInGroup INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_family_group_facts_groupThreadId ON companion_family_group_facts(groupThreadId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_family_group_facts_ownerCharacterId ON companion_family_group_facts(ownerCharacterId)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_group_member_states (groupThreadId TEXT NOT NULL, characterId TEXT NOT NULL, attention INTEGER NOT NULL, affection INTEGER NOT NULL, jealousy INTEGER NOT NULL, unspokenIntent TEXT NOT NULL, lastSpokeAt INTEGER, PRIMARY KEY(groupThreadId, characterId))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_group_settings (groupThreadId TEXT NOT NULL, atmosphere TEXT NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(groupThreadId))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_group_derived_memory_links (factId TEXT NOT NULL, characterId TEXT NOT NULL, semanticMemoryId TEXT NOT NULL, PRIMARY KEY(factId, characterId, semanticMemoryId))")
+            }
+        }
+        val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_characters ADD COLUMN relationshipPrompt TEXT NOT NULL DEFAULT ''")
+            }
+        }
+        val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_group_settings ADD COLUMN proactiveEnabled INTEGER NOT NULL DEFAULT 1")
+            }
+        }
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_image_prompt_cache (cacheKey TEXT NOT NULL, finalPrompt TEXT NOT NULL, createdAt INTEGER NOT NULL, lastUsedAt INTEGER NOT NULL, PRIMARY KEY(cacheKey))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_image_prompt_cache_lastUsedAt ON companion_image_prompt_cache(lastUsedAt)")
+            }
+        }
+        val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP INDEX IF EXISTS index_companion_image_prompt_cache_lastUsedAt")
+                db.execSQL("DROP TABLE IF EXISTS companion_image_prompt_cache")
+            }
+        }
+        val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_group_private_followup_uses (groupThreadId TEXT NOT NULL, characterId TEXT NOT NULL, messageId TEXT NOT NULL, usedAt INTEGER NOT NULL, PRIMARY KEY(groupThreadId, characterId, messageId))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_group_private_followup_uses_groupThreadId ON companion_group_private_followup_uses(groupThreadId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_companion_group_private_followup_uses_characterId ON companion_group_private_followup_uses(characterId)")
+            }
+        }
+
+        val MIGRATION_25_26 = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_world_state (id TEXT NOT NULL, worldTime INTEGER NOT NULL DEFAULT 0, weather TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '', updatedAt INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_future_timelines (id TEXT NOT NULL, startTime INTEGER NOT NULL, endTime INTEGER NOT NULL, eventsJson TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'planned', createdAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_world_events (id TEXT NOT NULL, eventType TEXT NOT NULL DEFAULT '', participants TEXT NOT NULL DEFAULT '', eventTime INTEGER NOT NULL DEFAULT 0, result TEXT NOT NULL DEFAULT '', memory TEXT NOT NULL DEFAULT '', createdAt INTEGER NOT NULL, PRIMARY KEY(id))")
+            }
+        }
+
+        val MIGRATION_24_25 = object : Migration(24, 25) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_character_personality (characterId TEXT NOT NULL, care INTEGER NOT NULL DEFAULT 50, initiative INTEGER NOT NULL DEFAULT 50, conversation INTEGER NOT NULL DEFAULT 50, independence INTEGER NOT NULL DEFAULT 50, warmth INTEGER NOT NULL DEFAULT 50, coreDescription TEXT NOT NULL DEFAULT '', behaviorTendency TEXT NOT NULL DEFAULT '', updatedAt INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(characterId))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_character_goals (id TEXT NOT NULL, characterId TEXT NOT NULL, goal TEXT NOT NULL, importance INTEGER NOT NULL DEFAULT 5, source TEXT NOT NULL DEFAULT '', expireTime INTEGER NOT NULL DEFAULT 0, resolved INTEGER NOT NULL DEFAULT 0, createdAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_decision_chains (id TEXT NOT NULL, characterId TEXT NOT NULL, action TEXT NOT NULL, emotionSummary TEXT NOT NULL DEFAULT '', motivation TEXT NOT NULL DEFAULT '', conflictSummary TEXT NOT NULL DEFAULT '', decisionReason TEXT NOT NULL DEFAULT '', confidence INTEGER NOT NULL DEFAULT 0, createdAt INTEGER NOT NULL, PRIMARY KEY(id))")
+            }
+        }
+
+        val MIGRATION_23_24 = object : Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_character_life_state (characterId TEXT NOT NULL, energy INTEGER NOT NULL DEFAULT 80, stress INTEGER NOT NULL DEFAULT 40, loneliness INTEGER NOT NULL DEFAULT 30, socialNeed INTEGER NOT NULL DEFAULT 40, currentGoal TEXT NOT NULL DEFAULT '', hiddenGoal TEXT NOT NULL DEFAULT '', updatedAt INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(characterId))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_relationships (characterAId TEXT NOT NULL, characterBId TEXT NOT NULL, affection INTEGER NOT NULL DEFAULT 50, trust INTEGER NOT NULL DEFAULT 50, dependence INTEGER NOT NULL DEFAULT 30, understanding INTEGER NOT NULL DEFAULT 40, conflict INTEGER NOT NULL DEFAULT 10, updatedAt INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(characterAId, characterBId))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_interaction_requests (id TEXT NOT NULL, senderCharacterId TEXT NOT NULL, receiverCharacterId TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, expireAt INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_activities (id TEXT NOT NULL, type TEXT NOT NULL, participantsJson TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '', durationMinutes INTEGER NOT NULL DEFAULT 30, status TEXT NOT NULL, startedAt INTEGER NOT NULL, finishedAt INTEGER, effectJson TEXT NOT NULL DEFAULT '', createdAt INTEGER NOT NULL, PRIMARY KEY(id))")
+            }
+        }
+
+        val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_image_api_pool ADD COLUMN generationRule TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_model_profiles ADD COLUMN topP REAL NOT NULL DEFAULT 0.85")
+                db.execSQL("ALTER TABLE companion_model_profiles ADD COLUMN frequencyPenalty REAL NOT NULL DEFAULT 0.30")
+                db.execSQL("ALTER TABLE companion_model_profiles ADD COLUMN presencePenalty REAL NOT NULL DEFAULT 0.20")
+            }
+        }
+
+        val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE companion_group_settings ADD COLUMN groupType TEXT NOT NULL DEFAULT 'GENERAL'")
+            }
+        }
+
+        val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_character_living_states (characterId TEXT NOT NULL, mood TEXT NOT NULL, currentActivity TEXT NOT NULL, activityStartedAt INTEGER NOT NULL, sleepUntil INTEGER, scheduleJson TEXT NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(characterId))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS companion_thread_summaries (threadId TEXT NOT NULL, role TEXT NOT NULL, summary TEXT NOT NULL, summarizedUpToMessageId TEXT, updatedAt INTEGER NOT NULL, PRIMARY KEY(threadId))")
+            }
+        }
+    }
+}

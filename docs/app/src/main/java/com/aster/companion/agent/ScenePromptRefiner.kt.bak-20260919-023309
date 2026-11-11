@@ -1,0 +1,181 @@
+package com.aster.companion.agent
+
+/**
+ * Scene 递进细化（第 2、3 轮）的规则与提示词组装。
+ *
+ * 第 2 轮做的是**形态改写**：把第 1 轮那段画面描述改写成规则要求的提示词形态
+ * （英文 Danbooru 标签串 / 自然语言长句），并在改写时把细节写得更**具体**
+ * （材质、颜色、形状、尺寸、状态、角度、方向、质感）；第 3 轮在此基础上再细一层。
+ * 人物、地点、动作、服饰、光线、风格、构图一律不许换，也不许新增或删掉画面元素。
+ * 输出形态由 [system] 按 [ScenePromptFormat] 写死，改写不能把英文改成中文。
+ */
+object ScenePromptRefiner {
+
+    /**
+     * 单轮细化结果的字符数上限；超了按不合格处理，沿用上一轮。
+     *
+     * 留得宽是必须的：第 2 轮要把第 1 轮的叙述**改写成极度详细的 Danbooru 标签串**，
+     * 上限卡在 1_500 时它必然超限被判 `too_long` 丢弃，出图只能退回第 1 轮的叙述——
+     * 第 2 轮的规则写得再细也用不上。这个值必须**低于** `ComfyTagPromptPolicy.MAX_LENGTH`（最终入队校验），
+     * 否则第 2 轮刚通过、末段校验又把它拦下来。
+     */
+    const val MAX_CHARS = 4_000
+
+    /** 第 [pass] 轮（2 或 3）的规则：网关上取不到对应 key 时用这份内置默认。 */
+    fun defaultRule(format: ScenePromptFormat, pass: Int): String = when (format) {
+        // Krea 2 走英文，内置兜底也必须是英文——否则网关取不到 krea2en.* 时会塞一份中文规则，
+        // 输出语言当场翻车。
+        ScenePromptFormat.ENGLISH_NATURAL ->
+            if (pass <= 2) EN_PASS2 else EN_PASS3
+        ScenePromptFormat.NATURAL_LANGUAGE, ScenePromptFormat.CHINESE_NATURAL ->
+            if (pass <= 2) NATURAL_PASS2 else NATURAL_PASS3
+        else -> if (pass <= 2) TAGS_PASS2 else TAGS_PASS3
+    }
+
+    /** ENGLISH_NATURAL 的内置兜底（网关 `image.sceneRule.krea2.pass{2,3}` 缺席时用）。 */
+    private val EN_PASS2 = """
+        Turn the description above into one expanded English prompt for Krea 2.
+        The draft may be written in Chinese - TRANSLATE it into English first, then write the final prompt.
+        Preserve every subject, action, color and spatial relationship - add nothing the draft does not have.
+        Write flowing English sentences with a subject and a verb; never comma-separated noun phrases.
+        Describe ONE frozen moment, not a process: what things look like now, not what is in progress.
+        Everything must be physically possible in the same frame.
+        Her appearance block is prepended to the final prompt VERBATIM BY THE SYSTEM, so never restate
+        it: not her age, face shape, eyes, lashes, nose, makeup, hair or figure.
+        That is NOT a licence to leave her face and body out. Her EXPRESSION is yours: where her eyes
+        look, how heavy the eyelids are, how far the lips part, whether the brows are drawn together.
+        Her BODY IN ACTION is yours too: the pose, the angle of torso, hips, shoulders and knees, what
+        each hand grips, exactly where her body touches the bed or him. A prompt with neither is failed.
+        Never write her name or any nickname - the renderer does not know names and turns them into
+        noise. Write "she", "the woman", "the man".
+        State the framing explicitly: how much of her fills the picture ("full body, from head to toe",
+        "close-up", "waist up"). DEFAULT TO FULL BODY unless the draft asks for a part of her - a prompt
+        with no framing word makes the model crop to half a body by itself. When the draft is about ONE
+        part of her ("aim at", "show the detail of", "only her ...") the framing is a CLOSE-UP of that
+        part, and then do not describe the whole figure.
+        The prompt must ADD UP - one coherent moment, not a collage: keep the level of detail matched to
+        the framing (a full body frame has no finger-level micro-detail), keep each object in exactly
+        one place (a garter strap on her thigh is not also "on her feet"; clothes cannot be both on and
+        off), and keep the pose, the support, the light and the scene consistent with each other.
+        Every person in the draft must appear, the partner included ("you", "he", the man holding her):
+        turn "you" into a concrete person, then write where his body is, which part of him touches or
+        enters which part of her, and which parts of him are visible. Never let the partner vanish, and
+        never write a contact as if she did it to herself.
+        Her appearance is prepended by the system: do not repeat it. Her EXPRESSION and her BODY POSITION
+        are NOT appearance - keep them, and add them if they are missing. Never cut a body-contact point
+        to save room - cut mood words instead.
+        When she is with him and the scene is sexual, that section must be the longest part of the prompt.
+        Take clothing from the draft first, then her profile, then the plainest everyday outfit; never
+        invent it. Match the draft's level of nudity and name anatomy directly (penis, glans, vulva,
+        labia, clitoris, vaginal opening, breasts, nipples) - never use euphemisms.
+        Her gaze lands on the camera by default. Do not put a phone, camera or lens in the picture.
+        Skip intensifiers (violently, extremely, rapidly) and skip negations - Krea cannot read "no".
+        Make emotion visible: which eyelid is heavy, how far the lips part, where the brows sit.
+        Say each thing once. No "then", "next" or "while".
+        Output only the English prompt: no headings, no numbering, no bullet lists, no markdown.
+    """.trimIndent()
+
+    private val EN_PASS3 = """
+        Refine the prompt above. Same language, same facts, same structure - add only precision.
+        Sharpen joints and angles (fingers, wrists, shoulders, hips, knees), fabric (folds, thickness,
+        drape, cling, which side the light falls on), skin and hair (sheen, stray strands, wetness),
+        and the contact points between bodies and surfaces.
+        Do not add people, clothing, locations or events. Do not switch to tag form.
+        Never write a character's name or nickname - the renderer does not know names.
+        Keep the exact framing words (full body / close-up / waist up) - add one if it is missing.
+        Her appearance is prepended by the system: do not repeat it. Her EXPRESSION and her BODY POSITION
+        are NOT appearance - keep them, and add them if they are missing. Never drop a body-contact
+        detail either.
+        Do not break the logic of the frame: keep the level of detail matched to the framing (a full
+        body frame has no finger-level micro-detail), keep every object in the one place the prompt
+        already puts it, and never add detail that contradicts the pose, the support or the light.
+        Output only the refined prompt: no headings, no numbering, no bullet lists.
+    """.trimIndent()
+
+    data class Prompt(val system: String, val user: String)
+
+    /**
+     * [rule] 是这一轮用的细化规则（网关优先，见 [ImageGenerationRuleResolver.resolveSceneRefineRule]）。
+     * [appearance] 是这个角色固定的长相描述——第 2 轮要以它为底，不许自己编长相。
+     */
+    fun prompt(
+        previous: String,
+        format: ScenePromptFormat,
+        pass: Int,
+        rule: String,
+        appearance: String = ""
+    ): Prompt = Prompt(
+        system = system(rule, format, pass, appearance),
+        user = user(previous, pass)
+    )
+
+    private fun system(
+        rule: String,
+        format: ScenePromptFormat,
+        pass: Int,
+        appearance: String
+    ): String = buildString {
+        appendLine(rule.trim().ifBlank { defaultRule(format, pass) })
+        if (appearance.isNotBlank()) {
+            appendLine()
+            appendLine("**她的固定长相（以此为准，不许自己编、不许美化、不许换人）**：")
+            appendLine(appearance.trim())
+        }
+        appendLine(formRequirement(format))
+        appendLine("只输出提示词本体，不要输出 WHY 行、不要解释、不要 markdown。")
+        appendLine("长度不超过 $MAX_CHARS 个字符。")
+    }.trim()
+
+    private fun user(previous: String, pass: Int): String = buildString {
+        appendLine("下面这段是上一轮（第 ${pass - 1} 轮）给出的画面描述。把它改写成规则要求的那种提示词（形态按规则来，可以是标签串，也可以是分段长句）：")
+        appendLine(previous.trim())
+    }.trim()
+
+    /** 形态硬约束：三轮都必须是同一种形态、同一种语言。校验轮（[SceneVerifier]）复用同一套。 */
+    internal fun formRequirement(format: ScenePromptFormat): String = when (format) {
+        ScenePromptFormat.ENGLISH_TAGS ->
+            "**输出必须是英文 tag 串**：逗号分隔、全英文，整段不许出现任何中文字符。"
+        ScenePromptFormat.ENGLISH_NATURAL ->
+            "**输出必须是英文自然语言长句**：全英文，按模块分段、段间换行，整段不许出现任何中文字符。"
+        // Krea 2 的编码器是 Qwen3-VL，要中文自然语言（和 z-image 一样按模块分段）。
+        ScenePromptFormat.CHINESE_NATURAL ->
+            "**输出必须是中文自然语言**：全中文，按模块分段、段间换行，不许输出英文 tag 串。"
+        ScenePromptFormat.NATURAL_LANGUAGE ->
+            "**输出必须是中文自然语言**：和上一轮同一种语言，不要改成英文 tag 串。"
+    }
+
+    private val TAGS_PASS2 = """
+        把上面那段画面描述改写成英文逗号分隔的 Danbooru 标签串（Illustrious XL 用）。
+        只做形态转换：人物、地点、动作、服饰、光线、风格、构图全部按原样搬过来，
+        不许换人、不许换场景、不许换衣服，也不许新增或删掉画面元素。
+        写得尽量细：每一项都补上看得见的修饰——材质、颜色、形状、尺寸、状态、位置、角度、方向。
+        整段必须是英文 tag 串，逗号分隔，不许出现任何中文字符。
+    """.trimIndent()
+
+    private val TAGS_PASS3 = """
+        把上面那段画面描述改写成英文逗号分隔的 Danbooru 标签串（Illustrious XL 用），并且比上一轮更细：
+        肢体拆到手指、手腕、肩、胯、膝盖这些关节与朝向；
+        布料写出褶皱、厚度、垂坠、贴身程度和光影落在哪一侧；皮肤、头发、眼神写出质感。
+        仍然只做形态转换：人物、地点、动作、服饰、光线、风格、构图全部按原样搬过来，
+        不许换人、不许换场景、不许换衣服，也不许新增或删掉画面元素。
+        整段必须是英文 tag 串，逗号分隔，不许出现任何中文字符。
+    """.trimIndent()
+
+    private val NATURAL_PASS2 = """
+        把上面那段画面描述改写成自然语言长句（语言按下面的形态要求来：英文形态写英文，中文形态写中文），
+        按模块分段、段间换行。
+        只做形态转换：人物、地点、动作、服饰、光线、风格、构图全部按原样搬过来，
+        不许换人、不许换场景、不许换衣服，也不许新增或删掉画面元素。
+        写得尽量细：每一处都补上材质、颜色、形状、尺寸、状态、位置、角度、方向这类看得见的细节，
+        把笼统的说法拆成具体的画面。
+    """.trimIndent()
+
+    private val NATURAL_PASS3 = """
+        把上面那段画面描述改写成自然语言长句（语言按下面的形态要求来：英文形态写英文，中文形态写中文），
+        按模块分段、段间换行，并且比上一轮更细：
+        肢体的关节角度与朝向、布料的褶皱厚度与垂坠、皮肤与头发的质感、
+        光影的方向与软硬、景深与镜头距离都写到具体。
+        仍然只做形态转换：人物、地点、动作、服饰、光线、风格、构图全部按原样搬过来，
+        不许换人、不许换场景、不许换衣服，也不许新增或删掉画面元素。
+    """.trimIndent()
+}

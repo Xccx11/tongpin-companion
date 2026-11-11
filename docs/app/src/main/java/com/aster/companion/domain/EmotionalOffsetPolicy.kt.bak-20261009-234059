@@ -1,0 +1,289 @@
+package com.aster.companion.domain
+
+import kotlin.math.abs
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+
+/**
+ * 情绪底色（Alter）：让"她这会儿的语气"带上惯性，而不是每轮从头开始。
+ *
+ * ## 要解决的问题
+ *
+ * 同一段对话里氛围是会**攒**起来的：一句一句顶上去之后，就算话题换了，语气也不该立刻回到初始值；
+ * 反过来被泼了冷水之后，也不该下一句就恢复如常。以前没有任何东西承载这件事——每一轮的语气都由
+ * 模型独立决定，于是要么一直很平，要么突然跳一下，而且**跳完就没了**，攒不起来。
+ *
+ * ## 机制（纯逻辑：无 IO、无模型调用、不读时钟）
+ *
+ * 1. 主对话每轮产出一个整数变化量，范围 [MIN_CHANGE]..[MAX_CHANGE]（0 = 这一轮没有明显位移）；
+ * 2. 变化量**带符号累积**在 [State.pending] 上（同向相加、反向相抵）；
+ * 3. 累积到**阈值**就算"该换底色了"。阈值不是常数：最近越活跃阈值越低（对话密集时她本来就在变，
+ *    不需要攒很久），但永不低于基础值的一半，避免密集对话里每轮都换一次底色；
+ * 4. 已经有一层底色时：同向变化让它更结实（权重上升），反向变化让它消退（权重下降）。
+ *    权重掉到 [MIN_WEIGHT] 以下说明"这股劲已经过去了"，底色清除——而反向那部分位移仍留在
+ *    [State.pending] 里，所以新方向可以自己攒到触发，不需要额外状态；
+ * 5. 真正去要那句底色描写由调用方负责；**生成失败不清空** [State.pending]，只记退避时间——
+ *    攒起来的东西不能因为一次失败就丢。
+ *
+ * ## 接线约定（下一阶段）
+ *
+ * - 状态落点：`companion_world_states` 的一个独立 `scope`（免 DB 迁移），内容是 [State] 的 JSON；
+ * - 注入点：system 里**独立的一块**（[render] 的产物），不要塞进「此刻：」。那一块是她的生活状态，
+ *   受"对话静默 30 分钟才允许后台改"的约束；底色是语气，两者混在一起以后就没法单独关掉了；
+ * - 变化量由谁产出、描写怎么写：都放在提示词里（走远程提示词），方便不重装 App 调风格。
+ */
+object EmotionalOffsetPolicy {
+
+    /** 单轮变化量的合法范围。正负各代表一个方向，0 = 这一轮没有明显位移。 */
+    const val MIN_CHANGE = -5
+    const val MAX_CHANGE = 5
+
+    /**
+     * 基础阈值：活跃度最低时需要的累积量。
+     *
+     * **这是整套参数里最可能需要按实际观感微调的一个**，调它只需要改这一个数。
+     *
+     * 取 6.0 的依据：位移信号来自状态记录器，而记录器每约 2 轮才跑一次（攒够 4 条消息），
+     * 且提示词引导模型多数只给 0/±1、明显升级时给 ±3 左右。6.0 意味着大约
+     * **3～6 次状态更新（6～12 轮）**换一次底色——太短会显得语气乱跳，太长就等于永不触发。
+     */
+    const val BASE_THRESHOLD = 6.0
+
+    /**
+     * 活跃度对阈值的最大削减比例：0.3 表示最活跃时阈值降到 70%（10 → 7）。
+     *
+     * 密集对话里她的语气本来就在连续变化，不需要攒那么久；反过来冷场时攒得慢一点，
+     * 避免"半小时才说一句话，两轮就换了个底色"。
+     */
+    const val DENSITY_FACTOR = 0.3
+
+    /** 阈值永远不低于基础值的这个比例，避免密集对话里每轮都触发一次。 */
+    const val MIN_THRESHOLD_RATIO = 0.5
+
+    /** 判定活跃度的窗口长度。 */
+    const val DENSITY_WINDOW_MS = 60 * 60 * 1000L
+
+    /** 窗口内到这个数量就算"满活跃"（再多也不继续降阈值）。调用方传的是**消息条数**。 */
+    const val DENSITY_SATURATION_UNITS = 10
+
+    /** 同向增强：每 1 点同向 |变化量| 让底色权重上升这么多。 */
+    const val SAME_DIRECTION_BOOST = 0.05
+
+    /** 反向消退：每 1 点反向 |变化量| 让底色权重下降这么多。 */
+    const val OPPOSITE_DECAY = 0.15
+
+    /** 权重低于这个值就认为那股劲过去了，清除底色。 */
+    const val MIN_WEIGHT = 0.2
+
+    /** 强度的合法上限。写进提示词的是数值，别让它无限涨。 */
+    const val MAX_INTENSITY = 2.0
+
+    /**
+     * 位移的封顶倍数。
+     *
+     * 到了阈值就该去生成了，但生成可能连续失败（那时 [State.pending] 会继续攒），
+     * 所以允许它长到当前阈值的两倍再封顶——强度也正好在那里饱和到 [MAX_INTENSITY]。
+     */
+    const val PENDING_CAP_RATIO = 2.0
+
+    /** 底色描写长度上限（只占 system 一行，不能长）。 */
+    const val MAX_DESCRIPTION_CHARS = 60
+
+    /** 底色的有效期：超过就当作没有了，避免几天前的语气一直挂着。 */
+    const val OFFSET_TTL_MS = 6 * 60 * 60 * 1000L
+
+    /** 生成失败后的最短重试间隔（失败不清空 pending，只是先别急着再试）。 */
+    const val RETRY_BACKOFF_MS = 5 * 60 * 1000L
+
+    /**
+     * 一层底色的全部状态。用 [toJson] / [fromJson] 存进 world state 的 `content`。
+     *
+     * 所有字段都有默认值：旧数据（或字段以后增加）读进来不会炸。
+     */
+    @Serializable
+    data class State(
+        /** 累积中的位移（带符号）。到 |pending| ≥ 阈值就该换底色了。 */
+        val pending: Double = 0.0,
+        /** 当前底色的结实程度 0..1。 */
+        val weight: Double = 0.0,
+        /** 当前底色的方向：+1 / -1 / 0（0 = 没有底色）。 */
+        val direction: Int = 0,
+        /** 底色描写：给模型看的那一两句。 */
+        val description: String = "",
+        /** 这层底色是什么时候生成的。 */
+        val generatedAt: Long = 0L,
+        /** 上次尝试生成（含失败）的时刻，用于退避。 */
+        val lastAttemptAt: Long = 0L
+    ) {
+        fun toJson(): String = json.encodeToString(serializer(), this)
+
+        companion object {
+            private val json = Json { ignoreUnknownKeys = true }
+
+            fun fromJson(raw: String?): State {
+                if (raw.isNullOrBlank()) return State()
+                return runCatching { json.decodeFromString(serializer(), raw) }.getOrDefault(State())
+            }
+        }
+    }
+
+    /** 已有底色时它是否还有效（没过期、有描写、方向合法）。 */
+    fun hasActiveOffset(state: State, now: Long): Boolean =
+        state.direction != 0 &&
+            state.description.isNotBlank() &&
+            state.generatedAt > 0L &&
+            now - state.generatedAt <= OFFSET_TTL_MS
+
+    /**
+     * 阈值：活跃度越高越低。
+     *
+     * [recentTurns] = 最近 [DENSITY_WINDOW_MS] 内的**消息条数**（调用方统计）。
+     */
+    fun thresholdFor(recentTurns: Int): Double {
+        val density = (recentTurns.toDouble() / DENSITY_SATURATION_UNITS).coerceIn(0.0, 1.0)
+        val raw = BASE_THRESHOLD * (1.0 - density * DENSITY_FACTOR)
+        return raw.coerceAtLeast(BASE_THRESHOLD * MIN_THRESHOLD_RATIO)
+    }
+
+    /** 触发时写进生成请求的强度：位移相对阈值有多满，夹在 [0, MAX_INTENSITY]。 */
+    fun intensityFor(state: State, recentTurns: Int): Double {
+        val threshold = thresholdFor(recentTurns)
+        if (threshold <= 0.0) return 0.0
+        return (abs(state.pending) / threshold).coerceIn(0.0, MAX_INTENSITY)
+    }
+
+    /**
+     * 吃掉一轮的变化量，返回新状态。
+     *
+     * [change] 会被夹进 [MIN_CHANGE]..[MAX_CHANGE]；0 表示这一轮没有位移（不动任何东西）。
+     * [recentTurns] 用来算当前阈值，从而决定位移的封顶（见 [PENDING_CAP_RATIO]）。
+     */
+    fun observe(state: State, change: Int, recentTurns: Int): State {
+        val clamped = change.coerceIn(MIN_CHANGE, MAX_CHANGE)
+        if (clamped == 0) return state
+        val cap = thresholdFor(recentTurns) * PENDING_CAP_RATIO
+        val nextPending = (state.pending + clamped.toDouble()).coerceIn(-cap, cap)
+
+        var weight = state.weight
+        var direction = state.direction
+        var description = state.description
+        var generatedAt = state.generatedAt
+
+        if (state.direction != 0 && clamped != 0) {
+            val magnitude = abs(clamped).toDouble()
+            val sign = signOf(clamped.toDouble())
+            if (sign == state.direction) {
+                // 同向：这层底色更结实了。
+                weight = (weight + magnitude * SAME_DIRECTION_BOOST).coerceAtMost(1.0)
+            } else {
+                // 反向：这层底色在消退。掉到下限就清掉——
+                // 反向位移已经记在 pending 里，新方向可以自己攒到触发。
+                val next = weight - magnitude * OPPOSITE_DECAY
+                if (next < MIN_WEIGHT) {
+                    weight = 0.0
+                    direction = 0
+                    description = ""
+                    generatedAt = 0L
+                } else {
+                    weight = next
+                }
+            }
+        }
+
+        return state.copy(
+            pending = nextPending,
+            weight = weight.coerceIn(0.0, 1.0),
+            direction = direction,
+            description = description,
+            generatedAt = generatedAt
+        )
+    }
+
+    /**
+     * 现在该不该去生成一层新底色。
+     *
+     * 三个条件：还没有有效底色、累积量到了当前阈值、并且不在失败退避窗口里。
+     */
+    fun dueForGeneration(state: State, now: Long, recentTurns: Int): Boolean {
+        if (hasActiveOffset(state, now)) return false
+        if (abs(state.pending) < thresholdFor(recentTurns)) return false
+        if (state.lastAttemptAt > 0L && now - state.lastAttemptAt < RETRY_BACKOFF_MS) return false
+        return true
+    }
+
+    /** 生成方向：+1 / -1（调用方只在 [dueForGeneration] 为真时用）。 */
+    fun pendingDirection(state: State): Int = signOf(state.pending)
+
+    /**
+     * 生成成功：位移清零、换上新的底色、权重归 1。
+     *
+     * [description] 会被折叠空白、截到 [MAX_DESCRIPTION_CHARS]；空描写视为没生成（返回原状态）。
+     */
+    fun onGenerated(state: State, description: String, now: Long): State {
+        val clean = description
+            .lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.isNotBlank() }
+            ?.replace(Regex("\\s+"), " ")
+            ?.take(MAX_DESCRIPTION_CHARS)
+            .orEmpty()
+        if (clean.isBlank()) return state
+
+        val direction = signOf(state.pending).takeIf { it != 0 } ?: state.direction
+        if (direction == 0) return state
+
+        return state.copy(
+            pending = 0.0,
+            weight = 1.0,
+            direction = direction,
+            description = clean,
+            generatedAt = now,
+            lastAttemptAt = now
+        )
+    }
+
+    /**
+     * 生成失败：**保留** [State.pending]（攒起来的东西不能因为一次失败就丢），
+     * 只把退避时间推到现在，让 [dueForGeneration] 先安静一会儿。
+     */
+    fun onGenerationFailed(state: State, now: Long): State = state.copy(lastAttemptAt = now)
+
+    /**
+     * 拼进 system 的那一块；没有可用底色时返回空串（调用方据此不 append 任何东西）。
+     *
+     * 措辞刻意写清"这是延续下来的"，否则模型会把它当成这一轮的新设定去演。
+     */
+    fun render(state: State, now: Long): String {
+        if (!hasActiveOffset(state, now)) return ""
+        return "情绪底色（这是从前面几轮延续下来的语气，不是这一轮才出现的，${strengthWord(state.weight)}）：" +
+            state.description
+    }
+
+    /** 权重 → 给模型看的程度词（比丢一个 0.75 这样的数字更好用）。 */
+    fun strengthWord(weight: Double): String = when {
+        weight >= 0.8 -> "很强"
+        weight >= 0.5 -> "明显"
+        else -> "有点"
+    }
+
+    /**
+     * 解析模型给出的这一轮变化量：取第一个整数（允许 "+3" / "3 分" / "变化：-2"）。
+     *
+     * 认不出来返回 null（调用方按"这一轮没有位移"处理），认出来则夹进合法范围。
+     */
+    fun parseChange(raw: String?): Int? {
+        if (raw.isNullOrBlank()) return null
+        val match = Regex("[-+]?\\d+").find(raw.trim()) ?: return null
+        val value = match.value.toIntOrNull() ?: return null
+        return value.coerceIn(MIN_CHANGE, MAX_CHANGE)
+    }
+
+    /** [parseChange] 的宽松版：认不出来当作 0。 */
+    fun parseChangeOrZero(raw: String?): Int = parseChange(raw) ?: 0
+
+    private fun signOf(value: Double): Int = when {
+        value > 0.0 -> 1
+        value < 0.0 -> -1
+        else -> 0
+    }
+}

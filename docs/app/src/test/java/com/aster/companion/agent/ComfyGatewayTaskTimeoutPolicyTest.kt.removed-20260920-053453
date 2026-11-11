@@ -1,0 +1,16 @@
+package com.aster.companion.agent
+
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class ComfyGatewayTaskTimeoutPolicyTest {
+    @Test
+    fun `local ComfyUI task waits at least three minutes even when profile timeout is sixty seconds`() {
+        assertEquals(180, ComfyGatewayTaskTimeoutPolicy.secondsFor(60))
+    }
+
+    @Test
+    fun `local ComfyUI task retains a longer configured timeout`() {
+        assertEquals(420, ComfyGatewayTaskTimeoutPolicy.secondsFor(420))
+    }
+}

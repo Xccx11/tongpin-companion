@@ -1,0 +1,70 @@
+package com.aster.companion.agent
+
+import android.util.Log
+import com.aster.companion.data.CompanionDao
+import com.aster.companion.data.CompanionSecretCipher
+import com.aster.companion.update.RemotePrompts
+import kotlinx.coroutines.CancellationException
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * 「推荐回复」生成器：她回复完之后调**一次**模型，替用户准备两条可以直接发出去的话
+ * （一条推进、一条收住）。见 [ReplySuggestionPolicy]。
+ *
+ * 几个刻意的设计约束（都别改）：
+ * - **没有定时器、没有轮询。** 只在"她刚回复完"这一个事件上跑。这个项目已经被
+ *   「朋友圈发帖决策每 30 秒原样重发一次」坑过一次，不在这里重演。
+ * - **失败就返回 null**（界面什么都不显示），不重试、不兜底 —— 跟用户定的规矩一致。
+ * - 用**对话模型**，跟聊天同一个 profile，不额外占显存。
+ * - 一次调用约 2～3 秒 GPU 时间；出图进行中时网关会直接回 503，这里拿到失败就放弃。
+ */
+@Singleton
+class ReplySuggestionCoordinator @Inject constructor(
+    private val dao: CompanionDao,
+    private val client: OpenAiCompatibleClient,
+    private val secretCipher: CompanionSecretCipher,
+    private val remotePrompts: RemotePrompts
+) {
+    /** 取不到建议就返回 null；调用方据此决定不显示。 */
+    suspend fun suggest(threadId: String, characterName: String): ReplySuggestion? {
+        val profile = dao.modelProfile(AgentTurnCoordinator.CONVERSATION_MODEL)
+            ?.takeIf { it.enabled && !it.encryptedApiKey.isNullOrBlank() }
+            ?: return null
+
+        val history = dao.recentMessages(threadId, ReplySuggestionPolicy.HISTORY_LIMIT)
+            .asReversed()
+            .map { it.fromUser to it.body }
+        // 只有一句（用户刚发的那句）时没有上下文可依据，不生成。
+        if (history.size < 2) return null
+
+        return try {
+            runCatching { remotePrompts.refreshIfStale() }
+            val system = ReplySuggestionPolicy.systemPrompt(
+                remotePrompts.get(ReplySuggestionPolicy.REMOTE_KEY)
+            )
+            val user = ReplySuggestionPolicy.userPrompt(characterName, history)
+            val raw = client.chat(
+                profile = profile,
+                apiKey = secretCipher.decrypt(requireNotNull(profile.encryptedApiKey)),
+                systemPrompt = system,
+                userPrompt = user
+            ).getOrElse { error ->
+                Log.w(TAG, "推荐回复生成失败，本次不显示", error)
+                return null
+            }
+            ReplySuggestionPolicy.parse(raw).also { parsed ->
+                if (parsed == null) Log.w(TAG, "推荐回复输出不合格，丢弃：${raw.take(160)}")
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Log.w(TAG, "推荐回复异常，本次不显示", error)
+            null
+        }
+    }
+
+    private companion object {
+        const val TAG = "TongpinReplySuggest"
+    }
+}

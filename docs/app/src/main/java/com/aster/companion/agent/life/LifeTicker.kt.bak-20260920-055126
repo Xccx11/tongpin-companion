@@ -1,0 +1,298 @@
+package com.aster.companion.agent.life
+
+import android.util.Log
+import com.aster.companion.agent.AgentTurnCoordinator
+import com.aster.companion.agent.OpenAiCompatibleClient
+import com.aster.companion.data.CharacterEntity
+import com.aster.companion.data.CharacterLifeStateEntity
+import com.aster.companion.data.CharacterLivingStateEntity
+import com.aster.companion.data.CompanionDao
+import com.aster.companion.data.CompanionSecretCipher
+import com.aster.companion.domain.CharacterSchedule
+import java.time.ZoneId
+import java.util.concurrent.ConcurrentHashMap
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlin.random.Random
+import kotlinx.coroutines.sync.Mutex
+
+/**
+ * 她的生活循环：**接着做手头的事，到点了才问一句要不要换**。
+ *
+ * ## 和「排一天」的区别
+ *
+ * 以前是提前排好一整天（几点吃饭、几点睡），她只是在执行表格——一看就假。
+ * 现在只维护**一件事**：她现在在做什么、做了多久、她自己的打算。
+ * 时间没到就直接返回，**什么都不做**（她还在做，别打扰她）；到了才问她一次，
+ * 而她的回答大多数时候是「继续」。
+ *
+ * 换的理由来自**她的需求**（[LifeNeedsPolicy] 推出来的累/孤单），不是「时间到了」。
+ *
+ * ## 内存里的东西丢了怎么办
+ *
+ * 「下次该问的时间」和「她的打算」放在内存里，进程重启会丢。丢了不要紧——
+ * 只是下一次 tick 会重新问她一遍，最坏也不过是她在同一件事上被多问一次。
+ */
+@Singleton
+class LifeTicker @Inject constructor(
+    private val dao: CompanionDao,
+    private val client: OpenAiCompatibleClient,
+    private val cipher: CompanionSecretCipher
+) {
+
+    private data class Pending(val reviewAt: Long, val intent: String)
+
+    private val pending = ConcurrentHashMap<String, Pending>()
+    private val locks = ConcurrentHashMap<String, Mutex>()
+    private val rnd = Random(System.currentTimeMillis())
+
+    /** 一拍：推进需求，然后在「该问的时候」问她一次。 */
+    suspend fun tick(now: Long, zone: ZoneId = ZoneId.systemDefault()) {
+        dao.allCharacters().forEach { character ->
+            runCatching { tickOne(character, now, zone) }
+                .onFailure { Log.w(TAG, "life tick failed for ${character.id}", it) }
+        }
+    }
+
+    /**
+     * 她刚和人说过话。
+     *
+     * 两件事：孤单掉一截；手头这件事**立刻重新评估一次**——真人被搭话之后，
+     * 手上的事多半是要断一下的。
+     */
+    suspend fun onTalkedTo(characterId: String, now: Long) {
+        runCatching {
+            val state = dao.lifeState(characterId) ?: return@runCatching
+            dao.upsertCharacterLifeState(LifeNeedsPolicy.relievedByContact(state, now))
+            pending[characterId] = Pending(reviewAt = now, intent = pending[characterId]?.intent.orEmpty())
+        }
+    }
+
+    private suspend fun tickOne(character: CharacterEntity, now: Long, zone: ZoneId) {
+        val living = dao.livingState(character.id)
+        val needs = dao.lifeState(character.id)
+            ?: CharacterLifeStateEntity(characterId = character.id, updatedAt = now)
+        val schedule = CharacterSchedule.fromJson(living?.scheduleJson.orEmpty())
+        val sleeping = living?.sleepUntil?.let { now < it } == true
+
+        // 1. 需求先随时间走——她是「因为累了才睡」，不是「因为 23:00 到了才睡」。
+        val advanced = LifeNeedsPolicy.advance(needs, now, sleeping, schedule)
+        dao.upsertCharacterLifeState(advanced)
+
+        // 2. 睡着中 / 困到撑不住。
+        if (sleeping) {
+            if (LifeNeedsPolicy.shouldWake(advanced)) {
+                dao.upsertLivingState(
+                    rebuildLivingState(character.id, living, activity = "刚醒", locationId = HOME, mood = "", now = now)
+                )
+                pending[character.id] = Pending(now, "")
+            }
+            return
+        }
+        if (LifeNeedsPolicy.wantsSleep(advanced)) {
+            val until = now + rnd.nextLong(SLEEP_MIN_MS, SLEEP_MAX_MS)
+            dao.upsertLivingState(
+                rebuildLivingState(
+                    characterId = character.id,
+                    previous = living,
+                    activity = "睡着了",
+                    locationId = living?.locationId ?: HOME,
+                    mood = "",
+                    now = now,
+                    sleepUntil = until
+                )
+            )
+            pending[character.id] = Pending(until, "睡一觉")
+            return
+        }
+
+        // 3. 还没到可以问的时候——她在做手头的事，这一拍什么都不做。
+        //    这是「不像快照」的关键：不换才是常态。
+        val due = pending[character.id]?.reviewAt
+            ?: ((living?.activityStartedAt?.takeIf { it > 0 } ?: now) + INITIAL_REVIEW_MS)
+        if (now < due) return
+
+        // 4. 到点了，问她一次。
+        val lock = locks.getOrPut(character.id) { Mutex() }
+        if (!lock.tryLock()) return
+        try {
+            val decision = ask(character, living, advanced, now, zone)
+                // 问不出来 / 认不出来 → 当她继续做手头的事，只把下次问的时间推后。
+                ?: LifeSwitchPolicy.Decision.Continue(intent = pending[character.id]?.intent.orEmpty())
+            applyDecision(character, living, decision, now)
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    /** 问一次「要不要换」。任何失败都返回 null（= 继续）。 */
+    private suspend fun ask(
+        character: CharacterEntity,
+        living: CharacterLivingStateEntity?,
+        needs: CharacterLifeStateEntity,
+        now: Long,
+        zone: ZoneId
+    ): LifeSwitchPolicy.Decision? {
+        val profile = dao.modelProfile(AgentTurnCoordinator.CONVERSATION_MODEL)
+            ?.takeIf { it.enabled && !it.encryptedApiKey.isNullOrBlank() }
+            ?: return null
+        val apiKey = runCatching { cipher.decrypt(requireNotNull(profile.encryptedApiKey)) }.getOrNull()
+            ?: return null
+
+        val moment = LivingMoment(
+            activity = living?.currentActivity?.takeIf { it.isNotBlank() } ?: "闲着",
+            startedAt = living?.activityStartedAt?.takeIf { it > 0 } ?: now,
+            mood = living?.mood.orEmpty(),
+            locationId = living?.locationId ?: HOME,
+            intent = pending[character.id]?.intent.orEmpty(),
+            reviewAt = now
+        )
+        val input = LifeSwitchPolicy.Input(
+            characterName = character.name,
+            personalityPrompt = character.personalityPrompt,
+            relationshipPrompt = character.relationshipPrompt,
+            moment = moment,
+            needs = needs,
+            now = now,
+            zone = zone,
+            recent = dao.latestPrivateThread(character.id)
+                ?.let { thread -> dao.recentMessages(thread.id, RECENT_LIMIT).asReversed() }
+                .orEmpty()
+                .mapNotNull { message ->
+                    val body = message.body.trim().replace(WHITESPACE, " ")
+                    if (body.isEmpty() || body.startsWith("stream:")) null
+                    else "${if (message.fromUser) "他" else character.name}：${body.take(30)}"
+                }
+        )
+
+        val raw = client.chat(
+            profile = profile,
+            apiKey = apiKey,
+            systemPrompt = LifeSwitchPolicy.system(input),
+            userPrompt = LifeSwitchPolicy.user(input)
+        ).getOrNull() ?: return null
+
+        return LifeSwitchPolicy.parse(raw)
+    }
+
+    private suspend fun applyDecision(
+        character: CharacterEntity,
+        living: CharacterLivingStateEntity?,
+        decision: LifeSwitchPolicy.Decision,
+        now: Long
+    ) {
+        // 她生活里的「事件」——换事、睡着、接着做——只从这里打出来。
+        // 这是观察她这一天最直接的窗口（界面目前不展示她的状态）。
+        Log.i(
+            TAG,
+            "${character.name}：${living?.currentActivity ?: "（还没有状态）"} → " + when (decision) {
+                is LifeSwitchPolicy.Decision.Continue ->
+                    "继续（${decision.intent.ifBlank { "没特别打算" }}）"
+                is LifeSwitchPolicy.Decision.Switch ->
+                    "换成「${decision.activity}」（${decision.reason.ifBlank { "没说为什么" }}）"
+                is LifeSwitchPolicy.Decision.Sleep -> "睡了"
+            }
+        )
+        when (decision) {
+            is LifeSwitchPolicy.Decision.Continue -> {
+                pending[character.id] = Pending(
+                    reviewAt = LifeSwitchPolicy.nextReviewAt(now, decision, rnd),
+                    intent = decision.intent
+                )
+            }
+
+            is LifeSwitchPolicy.Decision.Switch -> {
+                dao.upsertLivingState(
+                    rebuildLivingState(
+                        characterId = character.id,
+                        previous = living,
+                        activity = decision.activity,
+                        locationId = decision.locationId ?: living?.locationId ?: HOME,
+                        mood = decision.mood,
+                        now = now,
+                        startNewActivity = true,
+                        reason = decision.reason
+                    )
+                )
+                pending[character.id] = Pending(
+                    reviewAt = LifeSwitchPolicy.nextReviewAt(now, decision, rnd),
+                    intent = decision.intent
+                )
+            }
+
+            is LifeSwitchPolicy.Decision.Sleep -> {
+                val until = now + rnd.nextLong(SLEEP_MIN_MS, SLEEP_MAX_MS)
+                dao.upsertLivingState(
+                    rebuildLivingState(
+                        characterId = character.id,
+                        previous = living,
+                        activity = "睡着了",
+                        locationId = living?.locationId ?: HOME,
+                        mood = "",
+                        now = now,
+                        sleepUntil = until
+                    )
+                )
+                pending[character.id] = Pending(until, decision.intent.ifBlank { "睡一觉" })
+            }
+        }
+    }
+
+    /**
+     * 只改该改的字段，其余保持原样——尤其是 `scheduleJson`，那是她的作息，不能被这里覆盖掉。
+     *
+     * 活动文本写成 **「在{地点名}，{活动}」**：系统里 `extractLocation` 只认这个格式，
+     * 少了地点前缀会让聊天顶栏的家庭距离标注消失、胶囊里的地点退化成"家里某处"。
+     * 地点名解析不出来时保持原来的纯活动文本（**不硬编地点**，宁可没有也不要写错）。
+     */
+    private suspend fun rebuildLivingState(
+        characterId: String,
+        previous: CharacterLivingStateEntity?,
+        activity: String,
+        locationId: String,
+        mood: String,
+        now: Long,
+        sleepUntil: Long? = null,
+        startNewActivity: Boolean = false,
+        reason: String = ""
+    ): CharacterLivingStateEntity {
+        val activityText = if (reason.isBlank()) activity else "$activity（$reason）"
+        val placeName = locationId.takeIf { it.isNotBlank() }
+            ?.let { id -> runCatching { dao.worldLocation(id)?.displayName }.getOrNull() }
+            ?.takeIf { it.isNotBlank() }
+        val withPlace = if (placeName != null && !activityText.startsWith("在")) {
+            "在$placeName，$activityText"
+        } else {
+            activityText
+        }
+        return CharacterLivingStateEntity(
+            characterId = characterId,
+            mood = mood.ifBlank { previous?.mood ?: DEFAULT_MOOD },
+            currentActivity = withPlace,
+            activityStartedAt = if (startNewActivity || previous?.currentActivity != withPlace) {
+                now
+            } else {
+                previous?.activityStartedAt?.takeIf { it > 0 } ?: now
+            },
+            sleepUntil = sleepUntil,
+            scheduleJson = previous?.scheduleJson.orEmpty(),
+            updatedAt = now,
+            locationId = locationId
+        )
+    }
+
+    private companion object {
+        const val TAG = "TongpinLife"
+        const val HOME = "home"
+        const val DEFAULT_MOOD = "calm"
+        const val RECENT_LIMIT = 6
+
+        /** 重启后第一次评估的间隔：别刚起来就问她一次，让她先把一件事做上一阵。 */
+        const val INITIAL_REVIEW_MS = 25 * 60_000L
+
+        const val SLEEP_MIN_MS = 6 * 3_600_000L
+        const val SLEEP_MAX_MS = 9 * 3_600_000L
+
+        val WHITESPACE = Regex("\\s+")
+    }
+}

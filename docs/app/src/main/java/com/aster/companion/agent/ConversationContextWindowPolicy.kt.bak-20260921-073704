@@ -1,0 +1,54 @@
+package com.aster.companion.agent
+
+/**
+ * 模型上下文预算：**App 必须在拼请求之前**把 system + 历史 + 当前消息压进模型的上下文里。
+ *
+ * 以前每个环节各自有一个上限（人设 2000 字、最近聊天 12 条×160 字、messages 20 条但单条 2000 字…），
+ * 合起来没人管总数：16K 的模型最坏会收到 2 万多字（中文约 1 字≈1 token），直接超上下文——
+ * 而服务端的溢出策略是 `truncateMiddle`（从中间砍），砍掉的正好是记忆。
+ *
+ * 这里只做**算术**，不做裁剪动作（裁剪在 [LiteContextBudgetPolicy]，拼装在 ConversationTurnCoordinator）。
+ *
+ * 用户会同时用 16K / 32K / 64K 的模型，所以预算不是一个写死的数，而是按档位算出来的。
+ */
+object ConversationContextWindowPolicy {
+    const val DEFAULT_CONTEXT_TOKENS = 16_384
+
+    /** 设置页档位：label → 模型上下文长度（token）。 */
+    val PRESETS: List<Pair<String, Int>> = listOf(
+        "16K（本地 8B~9B 小模型）" to 16_384,
+        "32K" to 32_768,
+        "64K" to 65_536,
+        "128K" to 131_072,
+    )
+
+    /** 用户填/存了奇怪的值时收敛到最近的档位。 */
+    fun normalize(contextTokens: Int): Int =
+        PRESETS.minByOrNull { kotlin.math.abs(it.second - contextTokens) }?.second ?: DEFAULT_CONTEXT_TOKENS
+
+    fun labelFor(contextTokens: Int): String =
+        PRESETS.firstOrNull { it.second == normalize(contextTokens) }?.first ?: "${normalize(contextTokens) / 1024}K"
+
+    /**
+     * 输入预算（字符）。
+     *
+     * 中文按 **1 字 ≈ 1 token** 保守估，并给输出留出 1/4：
+     * 16K → 12,288 字 · 32K → 24,576 字 · 64K → 49,152 字。
+     * 留 1/4 是因为 App 不发 `max_tokens`（采样参数归模型服务），回复长度不可控。
+     */
+    fun inputBudgetChars(contextTokens: Int): Int = normalize(contextTokens) * 3 / 4
+
+    /**
+     * 真实 messages 的窗口条数：随上下文线性放大（16K → 20 条、32K → 40 条、64K → 80 条）。
+     *
+     * 这只是**上限**，真正的窗口由 [LiteContextBudgetPolicy] 按预算再削。
+     */
+    fun historyLimit(contextTokens: Int): Int = (normalize(contextTokens) / 819).coerceIn(8, 160)
+
+    /** 一次请求的字符数估算（system + 历史 + 当前消息）。 */
+    fun estimateChars(
+        system: String,
+        history: List<ConversationRequestPolicy.Message>,
+        userPrompt: String
+    ): Int = system.length + history.sumOf { it.content.length } + userPrompt.length
+}

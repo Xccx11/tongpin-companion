@@ -1,0 +1,197 @@
+package com.aster.companion.domain
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * 情绪底色状态机（[EmotionalOffsetPolicy]）的纯逻辑测试。
+ *
+ * 这些用例描述的是**行为契约**：攒够才换、同向变结实、反向会消退、失败不丢位移、过期等于没有。
+ */
+class EmotionalOffsetPolicyTest {
+
+    private val t0 = 1_000_000_000_000L
+
+    private fun offset(
+        pending: Double = 0.0,
+        weight: Double = 0.0,
+        direction: Int = 0,
+        description: String = "",
+        generatedAt: Long = 0L,
+        lastAttemptAt: Long = 0L
+    ) = EmotionalOffsetPolicy.State(pending, weight, direction, description, generatedAt, lastAttemptAt)
+
+    @Test
+    fun `阈值随活跃度下降，但不低于基础值的一半`() {
+        assertEquals(6.0, EmotionalOffsetPolicy.thresholdFor(0), 0.0001)
+        assertEquals(5.46, EmotionalOffsetPolicy.thresholdFor(3), 0.0001)
+        assertEquals(4.2, EmotionalOffsetPolicy.thresholdFor(10), 0.0001)
+        assertEquals(4.2, EmotionalOffsetPolicy.thresholdFor(999), 0.0001)
+        assertTrue(EmotionalOffsetPolicy.thresholdFor(999) >= EmotionalOffsetPolicy.BASE_THRESHOLD * EmotionalOffsetPolicy.MIN_THRESHOLD_RATIO)
+    }
+
+    @Test
+    fun `变化量为零时状态完全不动`() {
+        val state = offset(pending = 3.0, weight = 0.5, direction = 1, description = "旧底色")
+        assertEquals(state, EmotionalOffsetPolicy.observe(state, 0, 0))
+    }
+
+    @Test
+    fun `变化量被夹进合法范围`() {
+        assertEquals(5.0, EmotionalOffsetPolicy.observe(offset(), 99, 0).pending, 0.0001)
+        assertEquals(-5.0, EmotionalOffsetPolicy.observe(offset(), -99, 0).pending, 0.0001)
+    }
+
+    @Test
+    fun `同向位移累积到阈值才该生成`() {
+        var state = offset()
+        state = EmotionalOffsetPolicy.observe(state, 2, 0)
+        state = EmotionalOffsetPolicy.observe(state, 2, 0)
+        assertFalse(EmotionalOffsetPolicy.dueForGeneration(state, t0, 0))
+        state = EmotionalOffsetPolicy.observe(state, 2, 0)
+        assertTrue(EmotionalOffsetPolicy.dueForGeneration(state, t0, 0))
+    }
+
+    @Test
+    fun `反向位移互相抵消`() {
+        var state = offset()
+        state = EmotionalOffsetPolicy.observe(state, 3, 0)
+        state = EmotionalOffsetPolicy.observe(state, -1, 0)
+        assertEquals(2.0, state.pending, 0.0001)
+    }
+
+    @Test
+    fun `对话密集时阈值更低，更快达到`() {
+        var state = offset()
+        state = EmotionalOffsetPolicy.observe(state, 2, 10)
+        assertFalse(EmotionalOffsetPolicy.dueForGeneration(state, t0, 10))
+        state = EmotionalOffsetPolicy.observe(state, 3, 10)
+        assertTrue(EmotionalOffsetPolicy.dueForGeneration(state, t0, 10))
+    }
+
+    @Test
+    fun `位移被阈值封顶，连续失败也不会无限增长`() {
+        var state = offset()
+        repeat(20) { state = EmotionalOffsetPolicy.observe(state, 5, 0) }
+        assertEquals(EmotionalOffsetPolicy.BASE_THRESHOLD * EmotionalOffsetPolicy.PENDING_CAP_RATIO, state.pending, 0.0001)
+    }
+
+    @Test
+    fun `强度按位移相对阈值计算并封顶`() {
+        assertEquals(1.0, EmotionalOffsetPolicy.intensityFor(offset(pending = 6.0), 0), 0.0001)
+        assertEquals(2.0, EmotionalOffsetPolicy.intensityFor(offset(pending = 50.0), 0), 0.0001)
+        assertEquals(0.5, EmotionalOffsetPolicy.intensityFor(offset(pending = 2.1), 10), 0.0001)
+    }
+
+    @Test
+    fun `生成成功后位移清零并换上底色`() {
+        val accumulated = offset(pending = 12.0)
+        val done = EmotionalOffsetPolicy.onGenerated(accumulated, "（语气发紧）", t0)
+        assertEquals(0.0, done.pending, 0.0001)
+        assertEquals(1.0, done.weight, 0.0001)
+        assertEquals(1, done.direction)
+        assertEquals("（语气发紧）", done.description)
+        assertEquals(t0, done.generatedAt)
+        assertTrue(EmotionalOffsetPolicy.hasActiveOffset(done, t0))
+    }
+
+    @Test
+    fun `空描写视为没生成`() {
+        val accumulated = offset(pending = 12.0)
+        assertEquals(accumulated, EmotionalOffsetPolicy.onGenerated(accumulated, "   ", t0))
+    }
+
+    @Test
+    fun `描写只取第一行并截断`() {
+        val multi = EmotionalOffsetPolicy.onGenerated(offset(pending = 12.0), "  第一行  \n第二行", t0)
+        assertEquals("第一行", multi.description)
+        val cut = EmotionalOffsetPolicy.onGenerated(offset(pending = 12.0), "x".repeat(200), t0)
+        assertEquals(EmotionalOffsetPolicy.MAX_DESCRIPTION_CHARS, cut.description.length)
+    }
+
+    @Test
+    fun `生成失败保留位移，只是进入退避`() {
+        val failed = EmotionalOffsetPolicy.onGenerationFailed(offset(pending = 12.0), t0)
+        assertEquals(12.0, failed.pending, 0.0001)
+        assertFalse(EmotionalOffsetPolicy.dueForGeneration(failed, t0, 0))
+        assertTrue(EmotionalOffsetPolicy.dueForGeneration(failed, t0 + EmotionalOffsetPolicy.RETRY_BACKOFF_MS, 0))
+    }
+
+    @Test
+    fun `同向变化让底色更结实`() {
+        val base = offset(weight = 0.7, direction = 1, description = "x", generatedAt = t0)
+        val boosted = EmotionalOffsetPolicy.observe(base, 1, 0)
+        assertEquals(0.75, boosted.weight, 0.0001)
+        assertEquals(1, boosted.direction)
+    }
+
+    @Test
+    fun `反向变化让底色消退`() {
+        val base = offset(weight = 1.0, direction = 1, description = "x", generatedAt = t0)
+        val decayed = EmotionalOffsetPolicy.observe(base, -2, 0)
+        assertEquals(0.7, decayed.weight, 0.0001)
+        assertEquals(1, decayed.direction)
+    }
+
+    @Test
+    fun `权重掉到下限以下就清除底色，但反向位移仍留着`() {
+        val base = offset(weight = 0.3, direction = 1, description = "x", generatedAt = t0)
+        val cleared = EmotionalOffsetPolicy.observe(base, -5, 0)
+        assertEquals(0, cleared.direction)
+        assertEquals("", cleared.description)
+        assertEquals(0.0, cleared.weight, 0.0001)
+        assertEquals(-5.0, cleared.pending, 0.0001)
+    }
+
+    @Test
+    fun `底色过期后等于没有`() {
+        val state = offset(direction = 1, weight = 1.0, description = "x", generatedAt = t0)
+        assertTrue(EmotionalOffsetPolicy.hasActiveOffset(state, t0 + EmotionalOffsetPolicy.OFFSET_TTL_MS))
+        assertFalse(EmotionalOffsetPolicy.hasActiveOffset(state, t0 + EmotionalOffsetPolicy.OFFSET_TTL_MS + 1))
+    }
+
+    @Test
+    fun `render 只在底色有效时给出那一块`() {
+        assertEquals("", EmotionalOffsetPolicy.render(offset(), t0))
+        val active = offset(direction = -1, weight = 0.9, description = "松下来了", generatedAt = t0)
+        val block = EmotionalOffsetPolicy.render(active, t0)
+        assertTrue(block.contains("松下来了"))
+        assertTrue(block.contains("延续"))
+        assertEquals("", EmotionalOffsetPolicy.render(active, t0 + EmotionalOffsetPolicy.OFFSET_TTL_MS + 1))
+    }
+
+    @Test
+    fun `程度词按权重分档`() {
+        assertEquals("很强", EmotionalOffsetPolicy.strengthWord(1.0))
+        assertEquals("明显", EmotionalOffsetPolicy.strengthWord(0.5))
+        assertEquals("有点", EmotionalOffsetPolicy.strengthWord(0.2))
+    }
+
+    @Test
+    fun `变化量解析取第一个整数并夹取`() {
+        assertEquals(3, EmotionalOffsetPolicy.parseChange("+3"))
+        assertEquals(-2, EmotionalOffsetPolicy.parseChange("变化：-2"))
+        assertEquals(5, EmotionalOffsetPolicy.parseChange("9"))
+        assertNull(EmotionalOffsetPolicy.parseChange("没有数字"))
+        assertNull(EmotionalOffsetPolicy.parseChange(null))
+        assertEquals(0, EmotionalOffsetPolicy.parseChangeOrZero("没有数字"))
+    }
+
+    @Test
+    fun `方向由位移符号决定`() {
+        assertEquals(1, EmotionalOffsetPolicy.pendingDirection(offset(pending = 3.0)))
+        assertEquals(-1, EmotionalOffsetPolicy.pendingDirection(offset(pending = -3.0)))
+        assertEquals(0, EmotionalOffsetPolicy.pendingDirection(offset()))
+    }
+
+    @Test
+    fun `状态可以 json 往返，坏数据退回空状态`() {
+        val state = offset(pending = -2.5, weight = 0.6, direction = -1, description = "松了", generatedAt = t0, lastAttemptAt = t0 + 1)
+        assertEquals(state, EmotionalOffsetPolicy.State.fromJson(state.toJson()))
+        assertEquals(EmotionalOffsetPolicy.State(), EmotionalOffsetPolicy.State.fromJson("不是 json"))
+        assertEquals(EmotionalOffsetPolicy.State(), EmotionalOffsetPolicy.State.fromJson(null))
+    }
+}

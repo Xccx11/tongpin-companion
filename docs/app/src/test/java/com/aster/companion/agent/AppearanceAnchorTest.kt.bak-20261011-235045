@@ -1,0 +1,105 @@
+package com.aster.companion.agent
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * 外貌锚点必须**一字不改**拼在提示词最前面。
+ *
+ * 为什么要用代码拼：krea2 要英文提示词，pass2 就得把用户的中文外貌档案译写一遍，
+ * 而译写必然丢细节——实测 254 的出图里「22 岁」写成 `28-year-old`、整段妆容消失、腰肢/胸/臀全丢。
+ */
+class AppearanceAnchorTest {
+
+    private val anchor = "一位22岁左右的东亚少女，鹅蛋脸，淡淡的腮红，淡润微红唇。"
+
+    @Test
+    fun `外貌原文拼在最前面且一字不改`() {
+        val prompt = "She lies on a messy bed, soft light from the window."
+
+        val composed = AppearanceAnchor.prepend(prompt, anchor)
+
+        assertTrue(composed.startsWith(anchor))
+        assertTrue(composed.endsWith(prompt))
+        assertTrue(composed.contains("\n"))
+    }
+
+    @Test
+    fun `已经拼过就不再重复`() {
+        val once = AppearanceAnchor.prepend("She lies on a bed.", anchor)
+
+        assertEquals(once, AppearanceAnchor.prepend(once, anchor))
+    }
+
+    @Test
+    fun `外貌为空时原样返回`() {
+        assertEquals("She lies on a bed.", AppearanceAnchor.prepend("She lies on a bed.", ""))
+        assertEquals("", AppearanceAnchor.prepend("", ""))
+    }
+
+    @Test
+    fun `提示词为空时只返回外貌`() {
+        assertEquals(anchor, AppearanceAnchor.prepend("", anchor))
+    }
+
+    private val englishAnchor = "A young East Asian woman, oval face, deep brown almond eyes, long black hair"
+
+    /** 认中文的形态（Krea 2 / z-image）：原文换行拼最前，一个字都不改。 */
+    @Test
+    fun `attach 在中文形态下换行拼原文`() {
+        val scene = "她坐在床边，上身是一件白色吊带裙。"
+
+        val composed = AppearanceAnchor.attach(scene, anchor, ScenePromptFormat.CHINESE_NATURAL)
+
+        assertTrue(composed.startsWith(anchor))
+        assertTrue(composed.contains("\n"))
+        assertTrue(composed.endsWith(scene))
+    }
+
+    /**
+     * 英文 tag 形态：必须**单行、逗号**拼在最前面。
+     *
+     * 这条是这次「外貌设定词又丢了」的回归测试：Scene 模型的规则里写着
+     * `No identity restatement`，模型不会写长相，代码再不算就整段消失。
+     */
+    @Test
+    fun `attach 在英文 tag 形态下单行逗号拼在最前且不重复`() {
+        val scene = "back view,\nover a sofa,\nhands on floor"
+
+        val composed = AppearanceAnchor.attach(scene, englishAnchor, ScenePromptFormat.ENGLISH_TAGS)
+
+        assertTrue("必须以长相开头", composed.startsWith(englishAnchor))
+        assertFalse("tag 形态不能有换行", composed.contains("\n"))
+        assertTrue(composed.contains("back view, over a sofa, hands on floor"))
+        assertEquals("拼过就不能再拼第二遍", composed, AppearanceAnchor.attach(composed, englishAnchor, ScenePromptFormat.ENGLISH_TAGS))
+    }
+
+    @Test
+    fun `attach 在 krea2 英文自然语言形态下同样拼原文`() {
+        val composed = AppearanceAnchor.attach("bending forward over a sofa", englishAnchor, ScenePromptFormat.ENGLISH_NATURAL)
+
+        assertTrue(composed.startsWith(englishAnchor))
+        assertTrue(composed.contains("bending forward over a sofa"))
+    }
+
+    /** 外貌没填时不动提示词（单行化是 `compose` 的活，不在这里做）。 */
+    @Test
+    fun `attach 在外貌为空时原样返回`() {
+        assertEquals("a,\nb", AppearanceAnchor.attach("a,\nb", "", ScenePromptFormat.ENGLISH_TAGS))
+        assertEquals("", AppearanceAnchor.attach("", "", ScenePromptFormat.CHINESE_NATURAL))
+    }
+
+    /** 校验只看模型写的画面段：外貌是用户写的，不能被"自言自语特征/长度"这类规则判不合格。 */
+    @Test
+    fun `strip 把代码拼上去的外貌剥掉`() {
+        val tagPrompt = AppearanceAnchor.attach("back view, over a sofa", englishAnchor, ScenePromptFormat.ENGLISH_TAGS)
+        assertEquals("back view, over a sofa", AppearanceAnchor.strip(tagPrompt, englishAnchor))
+
+        val cnPrompt = AppearanceAnchor.attach("她坐在床边。", anchor, ScenePromptFormat.CHINESE_NATURAL)
+        assertEquals("她坐在床边。", AppearanceAnchor.strip(cnPrompt, anchor))
+
+        assertEquals("back view", AppearanceAnchor.strip("back view", englishAnchor))
+    }
+}

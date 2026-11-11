@@ -1,0 +1,35 @@
+package com.aster.companion.agent
+
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class MomentImageTaskRecoveryPolicyTest {
+    @Test
+    fun `only a due failed moment image task is eligible for retry`() {
+        assertTrue(
+            MomentImageTaskRecoveryPolicy.shouldResume(
+                actionId = "moment-image:post-1",
+                capabilityId = MomentsAgentCoordinator.MOMENT_IMAGE_CAPABILITY,
+                state = "FAILED",
+                dueActionIds = setOf("moment-image:post-1")
+            )
+        )
+        assertFalse(
+            MomentImageTaskRecoveryPolicy.shouldResume(
+                actionId = "moment-image:post-1",
+                capabilityId = MomentsAgentCoordinator.MOMENT_IMAGE_CAPABILITY,
+                state = "RUNNING",
+                dueActionIds = setOf("moment-image:post-1")
+            )
+        )
+        assertFalse(
+            MomentImageTaskRecoveryPolicy.shouldResume(
+                actionId = "other-image",
+                capabilityId = "companion.generate_image",
+                state = "FAILED",
+                dueActionIds = setOf("other-image")
+            )
+        )
+    }
+}

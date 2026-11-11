@@ -1,0 +1,67 @@
+package com.aster.companion.agent
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ReplySuggestionPolicyTest {
+    @Test
+    fun `parses a clean json object into advance and hold back`() {
+        val parsed = ReplySuggestionPolicy.parse("""{"advance":"那你现在过来嘛","holdback":"算了，我先睡了"}""")
+        assertNotNull(parsed)
+        assertEquals("那你现在过来嘛", parsed!!.advance)
+        assertEquals("算了，我先睡了", parsed.holdBack)
+    }
+
+    @Test
+    fun `strips markdown fences and surrounding prose`() {
+        val raw = "好的，这是结果：\n```json\n{\"advance\":\"想我了没\",\"holdback\":\"在忙，等下说\"}\n```"
+        val parsed = ReplySuggestionPolicy.parse(raw)
+        assertNotNull(parsed)
+        assertEquals("想我了没", parsed!!.advance)
+        assertEquals("在忙，等下说", parsed.holdBack)
+    }
+
+    @Test
+    fun `rejects anything that is not a usable pair`() {
+        // 不是 JSON / 缺字段 / 空值 / 两条一模一样 / 超长 —— 一律整批丢掉，界面不显示。
+        assertNull(ReplySuggestionPolicy.parse("我不知道该说什么"))
+        assertNull(ReplySuggestionPolicy.parse("""{"advance":"在的"}"""))
+        assertNull(ReplySuggestionPolicy.parse("""{"advance":"","holdback":"在忙"}"""))
+        assertNull(ReplySuggestionPolicy.parse("""{"advance":"在忙","holdback":"在忙"}"""))
+        assertNull(ReplySuggestionPolicy.parse("""{"advance":"${"长".repeat(31)}","holdback":"在忙"}"""))
+    }
+
+    @Test
+    fun `normalize trims and enforces the length ceiling`() {
+        assertEquals(
+            ReplySuggestion("在的", "等下说"),
+            ReplySuggestionPolicy.normalize("  在的 ", " 等下说  ")
+        )
+        assertNull(ReplySuggestionPolicy.normalize("", "在忙"))
+        assertNull(ReplySuggestionPolicy.normalize("长".repeat(ReplySuggestionPolicy.MAX_CHARS + 1), "在忙"))
+        assertNotNull(
+            ReplySuggestionPolicy.normalize("长".repeat(ReplySuggestionPolicy.MAX_CHARS), "在忙")
+        )
+    }
+
+    @Test
+    fun `user prompt labels speakers and collapses long bodies`() {
+        val prompt = ReplySuggestionPolicy.userPrompt(
+            characterName = "林夕",
+            history = listOf(false to "洗好了吗", true to "刚洗完\n在擦头发")
+        )
+        assertTrue(prompt.contains("角色叫「林夕」"))
+        assertTrue(prompt.contains("- 林夕：洗好了吗"))
+        assertTrue(prompt.contains("- 用户：刚洗完 在擦头发"))
+    }
+
+    @Test
+    fun `remote prompt wins and blank remote falls back to the built in default`() {
+        assertEquals("远程规则", ReplySuggestionPolicy.systemPrompt("远程规则"))
+        assertEquals(ReplySuggestionPolicy.DEFAULT_SYSTEM, ReplySuggestionPolicy.systemPrompt(null))
+        assertEquals(ReplySuggestionPolicy.DEFAULT_SYSTEM, ReplySuggestionPolicy.systemPrompt("   "))
+    }
+}

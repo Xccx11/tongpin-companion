@@ -1,0 +1,46 @@
+# ---- Android / Gradle 构建产物（体积大头，绝不提交）----
+build/
+*/build/
+**/build/
+.gradle/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ---- 本机/私有配置 ----
+local.properties
+*.iml
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 密钥与签名（★一旦推公开仓库就是事故★）----
+adbkey
+adbkey.pub
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.kdbx
+secrets*
+*.env
+*.env.*
+
+# ---- 生成的安装包 ----
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# ---- 本地临时/工作目录 ----
+work/
+tmp/
+*.log
+logs/
+device-recovery/
+
+# ---- 大体积素材（按需再单独加回来）----
+screenshots/*.mp4

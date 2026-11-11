@@ -1,0 +1,74 @@
+package com.aster.companion.agent
+
+import com.aster.companion.data.ModelProfileEntity
+import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
+/** Builds the OpenAI-compatible conversation envelope without overriding gateway-owned parameters. */
+object ConversationRequestPolicy {
+    data class Message(val role: String, val content: String)
+
+    fun payload(
+        profile: ModelProfileEntity,
+        messages: List<Message>,
+        stream: Boolean,
+        withTools: Boolean = false
+    ): String =
+        buildJsonObject {
+            putBase(this, profile, messages, stream, withTools = withTools)
+        }.toString()
+
+    fun payload(
+        profile: ModelProfileEntity,
+        systemPrompt: String,
+        userPrompt: String,
+        history: List<Message> = emptyList(),
+        stream: Boolean
+    ): String = payload(
+        profile = profile,
+        messages = conversationMessages(systemPrompt, userPrompt, history),
+        stream = stream
+    )
+
+    fun conversationMessages(
+        systemPrompt: String,
+        userPrompt: String,
+        history: List<Message>
+    ): List<Message> = buildList {
+        add(Message("system", systemPrompt))
+        addAll(
+            history
+                .filter { it.role != "system" && it.content.isNotBlank() }
+                .map { message ->
+                    if (message.content.length > 2000) message.copy(content = message.content.take(2000))
+                    else message
+                }
+        )
+        if (userPrompt.isNotBlank()) add(Message("user", userPrompt))
+    }
+
+    fun putBase(
+        builder: JsonObjectBuilder,
+        profile: ModelProfileEntity,
+        messages: List<Message>,
+        stream: Boolean,
+        withTools: Boolean = false
+    ) {
+        builder.put("model", profile.modelName)
+        builder.put("stream", stream)
+        // 采样参数（温度、top_p）仍由模型服务自己决定，App 不发；
+        // 但**思考开关是 App 的**：用户有时把 Base URL 换成别家官方 API，这件事不能交给后台。
+        // 关闭时一个字段都不发（见 ConversationThinkingPolicy）。
+        ConversationThinkingPolicy.apply(builder, profile, withTools = withTools)
+        builder.put("messages", buildJsonArray {
+            messages.forEach { message ->
+                add(buildJsonObject {
+                    put("role", message.role)
+                    put("content", message.content)
+                })
+            }
+        })
+    }
+}

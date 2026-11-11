@@ -1,0 +1,18 @@
+package com.aster.companion.domain
+
+enum class ComfyImageDeliveryStep {
+    SUBMIT_PROMPT,
+    POLL_OUTPUT,
+    DOWNLOAD_OUTPUT,
+    DELIVER_TO_CHAT
+}
+
+/** Chooses the first unfinished ComfyUI delivery step so retries never submit a second prompt. */
+object ComfyImageDeliveryPolicy {
+    fun nextStep(promptId: String?, outputUrl: String?, localImageUri: String?): ComfyImageDeliveryStep = when {
+        !localImageUri.isNullOrBlank() -> ComfyImageDeliveryStep.DELIVER_TO_CHAT
+        !outputUrl.isNullOrBlank() -> ComfyImageDeliveryStep.DOWNLOAD_OUTPUT
+        !promptId.isNullOrBlank() -> ComfyImageDeliveryStep.POLL_OUTPUT
+        else -> ComfyImageDeliveryStep.SUBMIT_PROMPT
+    }
+}

@@ -1,0 +1,11 @@
+package com.aster.companion.agent
+
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class GroupReplySelectionParserTest {
+    @Test
+    fun `keeps only valid group speakers and caps natural replies at two`() {
+        assertEquals(listOf("a", "b"), GroupReplySelectionParser.parse("""{"speaker_ids":["a","missing","b","c"]}""", setOf("a", "b", "c")))
+    }
+}

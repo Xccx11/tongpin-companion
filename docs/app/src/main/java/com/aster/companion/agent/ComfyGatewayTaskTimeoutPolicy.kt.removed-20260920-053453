@@ -1,0 +1,9 @@
+package com.aster.companion.agent
+
+/** Local rendering can exceed a short provider timeout even though its task endpoint stays responsive. */
+object ComfyGatewayTaskTimeoutPolicy {
+    fun secondsFor(configuredSeconds: Int): Int = configuredSeconds.coerceIn(MINIMUM_SECONDS, MAXIMUM_SECONDS)
+
+    private const val MINIMUM_SECONDS = 180
+    private const val MAXIMUM_SECONDS = 10 * 60
+}

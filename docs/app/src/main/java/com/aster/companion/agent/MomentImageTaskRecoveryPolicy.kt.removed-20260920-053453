@@ -1,0 +1,9 @@
+package com.aster.companion.agent
+
+/** Keeps feed-image retries on the same durable queue as private and group images. */
+object MomentImageTaskRecoveryPolicy {
+    fun shouldResume(actionId: String, capabilityId: String, state: String, dueActionIds: Set<String>): Boolean =
+        capabilityId == MomentsAgentCoordinator.MOMENT_IMAGE_CAPABILITY &&
+            state == "FAILED" &&
+            actionId in dueActionIds
+}

@@ -1,0 +1,116 @@
+package com.aster.companion.agent
+
+import com.aster.companion.data.CompanionDao
+import com.aster.companion.data.MemoryEntity
+import com.aster.companion.domain.MemoryKind
+import kotlinx.coroutines.flow.firstOrNull
+import java.util.concurrent.atomic.AtomicLong
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * v2.1 社交世界 Tick：把 SocialEngine → InteractionManager → ActivityManager 串进世界循环。
+ * 在线 30 秒 tick（需求/互动 3 分钟节流）；离线 App 启动补算（数值推进 + 少量角色间互动记忆）。
+ */
+@Singleton
+class SocialWorldTickCoordinator @Inject constructor(
+    private val dao: CompanionDao,
+    private val socialEngine: SocialEngine,
+    private val interactionManager: InteractionManager,
+    private val activityManager: ActivityManager
+) {
+    /** 需求/互动节流（3 分钟一次，不像世界推演那么频繁）。 */
+    companion object {
+        const val SOCIAL_TICK_INTERVAL_MS = 3 * 60 * 1000L
+        const val LIFE_ADVANCE_INTERVAL_MS = 60 * 60 * 1000L
+        private const val TAG = "SocialWorld"
+    }
+
+    private val lastSocialTick = AtomicLong(0L)
+    private val lastLifeAdvance = AtomicLong(0L)
+
+    suspend fun tick(now: Long = System.currentTimeMillis()) {
+        // 0) 活动到期处理（每 30 秒检查，无模型调用）
+        runCatching { activityManager.updateRunningActivities(now) }
+            .onFailure { android.util.Log.w(TAG, "activity update failed", it) }
+        // 1) 需求→候选→决策→互动（3 分钟节流，含 DeepSeek 决策）
+        if (now - lastSocialTick.get() >= SOCIAL_TICK_INTERVAL_MS) {
+            lastSocialTick.set(now)
+            runCatching {
+                dao.allCharacters().forEach { character -> socialEngine.evaluateSocial(character.id, now) }
+            }.onFailure { android.util.Log.w(TAG, "social evaluate failed", it) }
+            runCatching { interactionManager.processPendingRequests(now) }
+                .onFailure { android.util.Log.w(TAG, "interaction process failed", it) }
+        }
+        // 2) 生命数值推进（1 小时一次，代码数值）
+        if (now - lastLifeAdvance.get() >= LIFE_ADVANCE_INTERVAL_MS) {
+            lastLifeAdvance.set(now)
+            runCatching { advanceLifeStates(now) }
+                .onFailure { android.util.Log.w(TAG, "life advance failed", it) }
+        }
+    }
+
+    /** App 启动：离线补算（上次活跃 → 现在）。 */
+    suspend fun catchUpOffline(now: Long = System.currentTimeMillis()) {
+        val lastActive = dao.worldStates("system", "LAST_ACTIVE").maxByOrNull { it.updatedAt }?.updatedAt
+        if (lastActive == null || lastActive <= 0L) return
+        val elapsedMs = now - lastActive
+        if (elapsedMs < 2 * 60 * 60 * 1000L) return  // 离线 < 2 小时不补算
+        val hours = (elapsedMs / (60 * 60 * 1000L)).toInt().coerceIn(1, 24)
+        // 数值推进（每角色，睡眠/清醒按小时）
+        val characters = dao.allCharacters()
+        characters.forEach { character ->
+            runCatching {
+                val life = dao.lifeState(character.id)
+                    ?: com.aster.companion.data.CharacterLifeStateEntity(characterId = character.id, updatedAt = now)
+                val sleeping = dao.livingState(character.id)?.sleepUntil?.let { now < it } == true
+                val advanced = com.aster.companion.domain.NeedEvaluator.advanceHourly(
+                    life.copy(updatedAt = now),
+                    hours = if (sleeping) 6 else hours
+                )
+                dao.upsertCharacterLifeState(advanced)
+            }
+        }
+        // 离线角色间互动记忆（代码生成，不调模型）：家庭群角色离线聊过/一起做事
+        characters.forEach { character ->
+            val familyIds = dao.allThreads()
+                .filter { it.type == com.aster.companion.domain.ConversationType.GROUP }
+                .filter { dao.groupSettings(it.id)?.groupType == "FAMILY" }
+                .filter { dao.participantIds(it.id).contains(character.id) }
+                .flatMap { dao.participantIds(it.id) }
+                .filter { it != character.id }
+                .distinct()
+            val targetId = familyIds.firstOrNull() ?: return@forEach
+            val targetName = dao.character(targetId)?.name ?: return@forEach
+            // 只记一次（防重复）：检查是否已有离线互动记忆
+            val already = dao.observeMemories().firstOrNull { list -> list.any { m -> m.content.contains("你不在的时候") } }
+            if (already != null) return@forEach
+            dao.upsertMemory(
+                MemoryEntity(
+                    id = "memory:offline:${java.util.UUID.randomUUID()}",
+                    characterId = character.id,
+                    threadId = null,
+                    kind = MemoryKind.EVENT,
+                    content = "你不在的时候，${character.name}和${targetName}在群里聊了一会儿天，等你回来。",
+                    blockedFromMention = false,
+                    createdAt = now,
+                    updatedAt = now
+                )
+            )
+            return@forEach
+        }
+        // 记录本次活跃时间
+        dao.upsertWorldState(com.aster.companion.data.WorldStateEntity(id = "system:last-active", characterId = "system", threadId = null, scope = "LAST_ACTIVE", content = "online", updatedAt = now))
+    }
+
+    private suspend fun advanceLifeStates(now: Long) {
+        dao.allCharacters().forEach { character ->
+            val life = dao.lifeState(character.id)
+                ?: com.aster.companion.data.CharacterLifeStateEntity(characterId = character.id, updatedAt = now)
+            val sleeping = dao.livingState(character.id)?.sleepUntil?.let { now < it } == true
+            dao.upsertCharacterLifeState(
+                com.aster.companion.domain.NeedEvaluator.advanceHourly(life, hours = if (sleeping) 1 else 1)
+            )
+        }
+    }
+}

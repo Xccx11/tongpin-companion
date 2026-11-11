@@ -1,0 +1,78 @@
+package com.aster.companion.ui
+
+import android.content.Context
+import dagger.hilt.android.qualifiers.ApplicationContext
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+
+data class ChatDisplayPreferences(
+    val splitMultilineResponses: Boolean = true,
+    val dimStageDirections: Boolean = true,
+    /** 回复逐字流式显示（默认开）。关掉后整条回复一次性出现。 */
+    val streamingOutput: Boolean = true,
+    /**
+     * 情绪底色（氛围惯性）：她的语气会跨轮延续（默认开）。
+     *
+     * 关掉后不再累积、不再生成、也不注入提示词——已经存下的底色会被直接忽略，
+     * 所以随时可以来回切，不会留下"半开"状态。
+     */
+    val emotionalOffsetEnabled: Boolean = true
+)
+
+/** App-local presentation choices. They never rewrite stored chat history. */
+@Singleton
+class ChatDisplaySettings @Inject constructor(@ApplicationContext context: Context) {
+    private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+    private val _preferences = MutableStateFlow(read())
+
+    val preferencesFlow: StateFlow<ChatDisplayPreferences> = _preferences
+
+    fun setSplitMultilineResponses(enabled: Boolean) = save(_preferences.value.copy(splitMultilineResponses = enabled))
+
+    fun setDimStageDirections(enabled: Boolean) = save(_preferences.value.copy(dimStageDirections = enabled))
+
+    fun setStreamingOutput(enabled: Boolean) = save(_preferences.value.copy(streamingOutput = enabled))
+
+    fun setEmotionalOffsetEnabled(enabled: Boolean) = save(_preferences.value.copy(emotionalOffsetEnabled = enabled))
+
+    private fun save(value: ChatDisplayPreferences) {
+        preferences.edit()
+            .putBoolean(KEY_SPLIT_MULTILINE, value.splitMultilineResponses)
+            .putBoolean(KEY_DIM_STAGE_DIRECTIONS, value.dimStageDirections)
+            .putBoolean(KEY_STREAMING_OUTPUT, value.streamingOutput)
+            .putBoolean(KEY_EMOTIONAL_OFFSET, value.emotionalOffsetEnabled)
+            .apply()
+        _preferences.value = value
+    }
+
+    private fun read() = ChatDisplayPreferences(
+        splitMultilineResponses = if (com.aster.companion.lite.LiteProductConfig.ENABLED) {
+            // Lite: always split so multi-beat replies become separate bubbles.
+            // Old installs may have saved false when the default was off.
+            true
+        } else if (preferences.contains(KEY_SPLIT_MULTILINE)) {
+            preferences.getBoolean(KEY_SPLIT_MULTILINE, true)
+        } else true,
+        dimStageDirections = if (preferences.contains(KEY_DIM_STAGE_DIRECTIONS)) {
+            preferences.getBoolean(KEY_DIM_STAGE_DIRECTIONS, true)
+        } else true,
+        // 默认开：以前是写死流式，用户要求默认仍是流式，但要一个关得掉的开关。
+        streamingOutput = if (preferences.contains(KEY_STREAMING_OUTPUT)) {
+            preferences.getBoolean(KEY_STREAMING_OUTPUT, true)
+        } else true,
+        // 默认开：语气惯性是"她更像真人"的一部分，但要一个关得掉的口子。
+        emotionalOffsetEnabled = if (preferences.contains(KEY_EMOTIONAL_OFFSET)) {
+            preferences.getBoolean(KEY_EMOTIONAL_OFFSET, true)
+        } else true
+    )
+
+    private companion object {
+        const val PREFERENCES_NAME = "tongpin_chat_display"
+        const val KEY_SPLIT_MULTILINE = "split_multiline_responses"
+        const val KEY_DIM_STAGE_DIRECTIONS = "dim_stage_directions"
+        const val KEY_STREAMING_OUTPUT = "streaming_output"
+        const val KEY_EMOTIONAL_OFFSET = "emotional_offset_enabled"
+    }
+}

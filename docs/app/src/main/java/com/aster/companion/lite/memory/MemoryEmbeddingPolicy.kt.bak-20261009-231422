@@ -1,0 +1,62 @@
+package com.aster.companion.lite.memory
+
+import kotlin.math.sqrt
+
+/**
+ * 向量检索的纯计算部分（记忆分册 §4.3 的 Embedding 分支）。
+ *
+ * 只做余弦相似度与排序；维度不一致或零向量一律返回 null，
+ * 由调用方回退到 [MemoryRetrievalPolicy] 的关键词规则。
+ */
+object MemoryEmbeddingPolicy {
+
+    /** 余弦相似度；向量不可比时返回 null。 */
+    fun cosine(a: FloatArray, b: FloatArray): Double? {
+        if (a.isEmpty() || b.isEmpty() || a.size != b.size) return null
+        var dot = 0.0
+        var normA = 0.0
+        var normB = 0.0
+        for (index in a.indices) {
+            dot += a[index] * b[index]
+            normA += a[index] * a[index]
+            normB += b[index] * b[index]
+        }
+        if (normA <= 0.0 || normB <= 0.0) return null
+        return dot / (sqrt(normA) * sqrt(normB))
+    }
+
+    /** 按余弦相似度降序排列；不可比的项直接丢弃。 */
+    fun rank(
+        facts: List<Pair<LiteMemoryFact, FloatArray>>,
+        query: FloatArray
+    ): List<LiteMemoryFact> = facts
+        .mapNotNull { (fact, vector) -> cosine(query, vector)?.let { fact to it } }
+        .sortedByDescending { it.second }
+        .map { it.first }
+
+    /** 向量排序后再套 Top-K 与字符预算，产出与关键词规则同样形态的「记得的事」。 */
+    fun selectBySimilarity(
+        facts: List<Pair<LiteMemoryFact, FloatArray>>,
+        query: FloatArray,
+        budget: MemoryBudget = MemoryBudgetPolicy.default
+    ): List<String> {
+        val eligible = facts.filter { (fact, _) ->
+            !fact.blockedFromMention && MemoryBudgetPolicy.isInjectable(fact.kind)
+        }
+        val selected = mutableListOf<String>()
+        var used = 0
+        for (fact in rank(eligible, query)) {
+            if (selected.size >= budget.topK) break
+            val content = fact.content.trim().replace(WHITESPACE, " ").take(budget.perFactChars)
+            if (content.isEmpty()) continue
+            val stamped = "${LiteTimeFormat.stamp(fact.updatedAt)}｜$content"
+            if (stamped in selected) continue
+            if (used + stamped.length > budget.totalCharBudget) continue
+            selected += stamped
+            used += stamped.length
+        }
+        return selected
+    }
+
+    private val WHITESPACE = Regex("\\s+")
+}

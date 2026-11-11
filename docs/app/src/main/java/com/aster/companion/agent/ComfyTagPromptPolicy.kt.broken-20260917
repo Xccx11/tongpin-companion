@@ -1,0 +1,197 @@
+package com.aster.companion.agent
+
+/**
+ * Lite 生图 prompt 入队闸门。
+ *
+ * 已放宽：允许中文、叙述句、混排 tag；只要非空且长度合理即可出图。
+ * 仅拦截：空白、超长、代码围栏、明显 JSON 外壳。
+ */
+object ComfyTagPromptPolicy {
+
+    data class Validation(
+        val accepted: Boolean,
+        val reasons: List<String> = emptyList()
+    )
+
+    /**
+     * [characterName] 只用来**剥掉**名字，不再因它判不合格：简报里全是对话原文（"角色名: …"），
+     * 模型写描述时常常把名字带出来，而渲染器本来就不认识人名。
+     * 真正要拦的是模型退化成「I am 宫雨琴. I want to send…」这种复述指令的自言自语 —— 那不是画面描述。
+     */
+    fun validate(
+        prompt: String,
+        appearancePrompt: String = "",
+        characterName: String = "",
+        maxLength: Int = MAX_LENGTH
+    ): Validation {
+        val text = prompt.trim()
+        val name = characterName.trim()
+        val body = if (name.isEmpty()) {
+            text
+        } else {
+            text.replace(name, " ").replace(Regex("\\s{2,}"), " ").trim()
+        }
+        val reasons = buildList {
+            if (body.isEmpty()) add("empty")
+            if (body.length > maxLength) add("too_long")
+            if (body.contains("```")) add("markdown_fence")
+            if (body.startsWith("{") || body.startsWith("[")) add("json")
+            if (NARRATION.any { it.containsMatchIn(body) }) add("narration")
+        }
+        if (reasons.isNotEmpty()) return Validation(accepted = false, reasons = reasons)
+        return Validation(accepted = true)
+    }
+
+    /** 模型退化成自言自语、复述指令的特征；正常的画面描述（无论 tag 还是叙述）都不会命中。 */
+    private val NARRATION = listOf(
+        Regex("\\bI am\\b", RegexOption.IGNORE_CASE),
+        Regex("\\bI want to\\b", RegexOption.IGNORE_CASE),
+        Regex("\\bI will send\\b", RegexOption.IGNORE_CASE),
+        Regex("\\bthe user\\b", RegexOption.IGNORE_CASE),
+        Regex("Preserve the real visual intent", RegexOption.IGNORE_CASE)
+    )
+
+    /** 剥掉模型爱包的 markdown 围栏（```...```）；原来只剥一个反引号，围栏根本剥不掉。 */
+    internal fun stripFences(text: String): String {
+        var t = text.trim()
+        if (t.startsWith("```")) {
+            t = t.removePrefix("```").removePrefix("english").removePrefix("text").removePrefix("plain")
+            t = t.trimStart('\n', ' ', '\t')
+            val end = t.lastIndexOf("```")
+            if (end >= 0) t = t.substring(0, end)
+        }
+        return t.trim().removeSurrounding("\"").trim()
+    }
+
+    fun finalPromptOrNull(
+        prompt: String,
+        appearancePrompt: String = "",
+        characterName: String = "",
+        maxLength: Int = MAX_LENGTH
+    ): String? {
+        val text = prompt.trim()
+        return text.takeIf { validate(it, appearancePrompt, characterName, maxLength).accepted }
+    }
+
+    /**
+     * 清掉模型写进提示词里、渲染器根本读不了的东西：
+     * 方括号占位符（真实数据里出现过 `[outfit from previous context]`）和中文。
+     *
+     * [stripCjk] 只在**英文 tag 模型**下为 true：z-image / lumina 这类走 Qwen 系编码器，
+     * 中文自然语言正是它要的，剥掉中文等于把提示词删空。
+     * 只用于**模型产出的场景段**，用户填的外貌锚点永远原样保留。
+     *
+     * [keepLineBreaks] 只在 **Krea 2（ENGLISH_NATURAL）** 下为 true：它是**按模块分段的纯文本**，
+     * 换行就是分段标记，所以这里逐行清洗、行结构原样保留（连续换行归一成一个 `\n`）；其余形态仍压成一行。
+     */
+    /**
+     * 出图前的**确定性清洗**：模型反复违反、而规则治不住的那几条，在这里用代码兜住。
+     *
+     * 起因：krea2.pass2 三千多字、二十多个约束点，模型每次只执行前面一部分。
+     * 眼睛又变回「又大又圆」、肤色层出现「毫无红晕」（否定句——Krea 读不到「没有」，
+     * 写了反而会画出来）、器官被写进背景层、代称「隐私部位」与解剖词混用。
+     * 这些不该指望提示词约束，用代码改更可靠。
+     *
+     * 只做四件事，不改内容：
+     *  1. 删掉**否定短语**所在的分句
+     *  2. 通用眼型（「又大又圆」这类）**换成狐狸眼八项模板**
+     *  3. 代称（隐私部位 / 私处 / 下面 / 那处）**换成解剖词**
+     *  4. 程度词（剧烈 / 猛烈 / 极度 / 极具 / 极其 / 夸张）**删掉**
+     */
+    internal fun finalPolish(text: String): String {
+        var t = text
+        for (re in NEGATION_CLAUSES) t = re.replace(t) { m -> m.value.takeLastWhile { c -> c in 。，,;；\n } }
+        for (re in GENERIC_EYES) t = re.replace(t, FOX_EYES)
+        for ((re, word) in EUPHEMISMS) t = re.replace(t, word)
+        for (re in INTENSIFIERS) t = re.replace(t, Q + Q)
+        return t.replace(Regex("[ \t]{2,}"), " ").trim()
+    }
+
+    /** 狐狸眼八项模板：模型爱写的高频通用眼型会盖掉角色档案，统一替换成它。 */
+    private const val FOX_EYES =
+        "杏核眼，内眼角尖细，外眼角微微上扬，深棕色虹膜，瞳孔有高光，上睫毛长而密，下睫毛纤细，眼尾微微拉长"
+
+    /** 否定分句：整句删。Krea 读不到否定，留着会把要禁的东西画出来。 */
+    private val NEGATION_CLAUSES = listOf(
+        Regex("[^。，,;；\n]*?(?:毫无|没有任何|完全没有任何|并没有|不具有)[^。，,;；\n]*[。，,;；]?"),
+    )
+
+    /** 通用眼型：CLIP/Qwen 都把它们当高频词，会盖掉角色档案里的狐狸眼。 */
+    private val GENERIC_EYES = listOf(
+        Regex("又大又圆的[^，,.。\n]{0,8}眼睛"),
+        Regex("又大又圆的[^，,.。\n]{0,8}双眼"),
+        Regex("大而圆的[^，,.。\n]{0,8}眼睛"),
+        Regex("又大又亮的[^，,.。\n]{0,8}眼睛"),
+        Regex("(一双)?大大的眼睛"),
+    )
+
+    /** 代称 -> 解剖词。代称生图模型读不懂，等于没写。 */
+    private val EUPHEMISMS = listOf(
+        Regex("隐私部位|私密部位|私处|私密处|那处|那个地方|下面") to "阴部",
+    )
+
+    /** 程度词：模型靠它们把画面写夸张（「剧烈晃动」「极具压迫感的量感」）。 */
+    private val INTENSIFIERS = listOf(
+        Regex("剧烈地?|猛烈地?|疯狂地?|极度地?|极具|极其|极为|非常地?|十分地?|夸张地?"),
+    )
+
+    fun sanitizeScene(prompt: String, stripCjk: Boolean = true, keepLineBreaks: Boolean = false): String {
+        var text = prompt
+            .replace(DANGLING_WORD_BEFORE_PLACEHOLDER, " ")
+            .replace(BRACKET_PLACEHOLDER, " ")
+        if (stripCjk) {
+            text = text.replace(CJK_RUN, " ")
+        }
+        val polished = text
+        return if (keepLineBreaks) {
+            polished.split(LINE_BREAK_RUN)
+                .map { line ->
+                    finalPolish(line).replace(COMMA_RUN, ", ")
+                        .replace(INLINE_WHITESPACE_RUN, " ")
+                        .trim()
+                        .trim(',')
+                        .trim()
+                }
+                .filter { it.isNotEmpty() }
+                .joinToString("\n")
+        } else {
+            finalPolish(polished)
+                .replace(COMMA_RUN, ", ")
+                .replace(WHITESPACE_RUN, " ")
+                .trim()
+                .trim(',')
+                .trim()
+        }
+    }
+
+    /**
+     * 场景 tag 被写成中文时的提示。本地 SDXL 认不出中文，出图会跟画面无关。
+     * 只提示、不代改。
+     */
+    fun sceneLanguageWarning(prompt: String): String? {
+        val text = prompt.trim()
+        if (text.isEmpty()) return null
+        val cjk = text.count { it.code in 0x3400..0x9FFF }
+        return if (cjk > text.length / 3) "场景标签写成了中文，本地 SDXL 认不出，出图会跟画面无关" else null
+    }
+
+    /** 真实数据里模型会照抄模板占位符（`[outfit from previous context]`），这种 tag 只会污染画面。 */
+    private val BRACKET_PLACEHOLDER = Regex("\\[[^\\]]*\\]")
+    /** 占位符前面那个动词也要一起清掉，否则会留下悬空的 `wearing,`。 */
+    private val DANGLING_WORD_BEFORE_PLACEHOLDER = Regex(
+        "(?i)\\b(wearing|holding|dressed in|carrying|using|with|having)\\s*\\[[^\\]]*\\]"
+    )
+    private val CJK_RUN = Regex("[\\u3400-\\u9FFF]+")
+    private val COMMA_RUN = Regex("\\s*,\\s*(?:,\\s*)*")
+    private val WHITESPACE_RUN = Regex("\\s+")
+    /** 换行（`\r\n` / `\r` / `\n` 通吃），Krea 2 保留行结构时用来按行切开。 */
+    private val LINE_BREAK_RUN = Regex("\\r\\n|\\r|\\n")
+    /** 行内空白：不含换行，保留行结构时可放心压成单空格。 */
+    private val INLINE_WHITESPACE_RUN = Regex("[ \\t\\x0B\\f]+")
+
+    /**
+     * 最终入队校验的上限，必须**略高于** `ScenePromptRefiner.MAX_CHARS`：
+     * 否则第 2 轮刚被判合格、这里又把它拦下来，细化结果依旧用不上。
+     */
+    private const val MAX_LENGTH = 6_000
+}

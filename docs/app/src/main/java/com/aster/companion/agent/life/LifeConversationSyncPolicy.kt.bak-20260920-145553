@@ -1,0 +1,82 @@
+package com.aster.companion.agent.life
+
+/**
+ * 「对话 → 时间胶囊」的本地对齐规则（**不调模型**）。
+ *
+ * 世界引擎下线后，胶囊不再由"对话后世界推演"更新；但她刚说过的话里往往已经写明了状态
+ *（"我在浴室，洗澡呢" / "我准备睡了"），于是用纯规则把这段状态**立刻**写进胶囊。
+ *
+ * **读不出明确状态就返回 null**：宁可不动，也不要乱猜——胶囊乱跳比不动更糟。
+ */
+object LifeConversationSyncPolicy {
+
+    /** 从一句话里读出的状态提示；各项都可以为空。 */
+    data class Hint(
+        val location: String?,
+        val action: String?,
+        val mood: String?,
+        val sleepNow: Boolean
+    )
+
+    /** 她说要睡了。 */
+    private val SLEEP_WORDS = listOf(
+        "睡了", "睡着", "我要睡", "准备睡", "先睡", "去睡", "晚安", "困了", "睡觉"
+    )
+
+    /** 常见地点：只认这些，避免把"在忙""在想你"当成地点。 */
+    private val PLACES = listOf(
+        "家", "卧室", "床上", "浴室", "卫生间", "厕所", "厨房", "客厅", "阳台", "书房", "沙发",
+        "公司", "办公室", "会议室", "工位", "地铁", "公交", "车上", "路上", "楼下", "门口",
+        "餐厅", "食堂", "超市", "便利店", "咖啡厅", "图书馆", "健身房", "公园", "商场", "学校",
+        "教室", "医院", "机场", "车站", "酒店", "外面", "街上"
+    )
+
+    /** 常见动作；顺序有意义（先长后短，避免"洗"吃掉"洗澡"）。 */
+    private val ACTIONS = listOf(
+        "洗澡", "洗头", "刷牙", "洗脸", "泡澡", "敷面膜", "泡脚", "化妆", "换衣服", "脱衣服", "穿衣服",
+        "做饭", "煮面", "洗碗", "吃饭", "收拾", "打扫", "洗衣服", "晾衣服",
+        "看书", "追剧", "看电视", "听歌", "写东西", "工作", "加班", "开会", "写方案", "摸鱼",
+        "健身", "跑步", "散步", "逛街", "购物", "发呆", "刷手机", "玩游戏",
+        "亲", "抱", "摸", "舔", "自慰", "做爱", "高潮", "口交", "后入", "骑", "插"
+    )
+
+    private val MOODS = listOf(
+        "开心", "高兴", "难过", "伤心", "生气", "委屈", "害羞", "兴奋", "烦", "累", "困", "想他"
+    )
+
+    fun parse(text: String): Hint? {
+        val body = text.trim()
+        if (body.isBlank()) return null
+        val sleepNow = SLEEP_WORDS.any { body.contains(it) }
+        val location = PLACES.firstOrNull { place ->
+            body.contains("在$place") || body.contains("去$place") || body.contains("回$place")
+        }
+        val action = ACTIONS.firstOrNull { body.contains(it) }
+        val mood = MOODS.firstOrNull { body.contains(it) }
+        if (!sleepNow && location == null && action == null && mood == null) return null
+        return Hint(location = location, action = action, mood = mood, sleepNow = sleepNow)
+    }
+
+    /**
+     * 从「在X，Y」里取出 X，用于**沿用上一轮的地点**（她这轮只说动作时不该把地点丢掉）。
+     */
+    fun locationHeadOf(activity: String): String? {
+        val head = activity.trim()
+            .removePrefix("在")
+            .substringBefore('，')
+            .substringBefore(',')
+            .trim()
+        return head.takeIf { it.isNotBlank() && it.length <= 8 }
+    }
+
+    /**
+     * 拼成 [com.aster.companion.agent.ConversationTurnCoordinator] 的地点解析认得的格式：
+     * **必须以「在」开头**，否则家庭距离/位置展示会退化成"家里某处"。
+     */
+    fun composeActivity(head: String?, action: String?): String? = when {
+        head != null && action != null -> "在$head，$action"
+        head != null -> "在$head"
+        action != null -> action
+        else -> null
+    }
+}

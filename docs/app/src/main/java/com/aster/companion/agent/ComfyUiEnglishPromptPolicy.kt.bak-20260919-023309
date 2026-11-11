@@ -1,0 +1,27 @@
+package com.aster.companion.agent
+
+/** Shared hard constraints for role-authored prompts sent to the ComfyUI-backed gateway. */
+object ComfyUiEnglishPromptPolicy {
+    fun hardRule(characterName: String): String = """
+        HARD RULE - COMFYUI ENGLISH PRODUCTION PROMPT:
+        When an image capability is selected, you ($characterName) must independently summarize the complete current context into one self-contained ComfyUI production prompt in English before calling the tool. Resolve references, the requested moment, your current state, identity, clothing, pose, expression, action, props, setting, camera framing, lighting, composition, color and rendering style from the full visible conversation and durable facts. Preserve every explicit visual requirement; do not copy the conversation or blindly repeat a short user phrase.
+        Put that finished English prompt only in arguments.scene (or image_prompt for a feed post). It must be a positive visual prompt for the renderer, not a chat reply, explanation, translation, JSON, markdown, negative prompt, relationship statement, delivery instruction, or workflow description. Do not ask the gateway or App to invent, summarize, translate, or rewrite the scene after you write it: your prompt is the source of truth and is sent directly to the ComfyUI-backed image endpoint.
+        If the context does not contain a visual request, do not call an image capability. If a visual request is explicit but details are missing, choose only neutral details grounded in your identity and current state; never invent a shared event or user action.
+    """.trimIndent()
+
+    fun isAcceptable(prompt: String): Boolean {
+        val text = prompt.trim()
+        // Lite：解除中文/英文/tag 形态限制，只拦空串与明显 JSON。
+        return text.isNotBlank() &&
+            !text.contains("```") &&
+            !text.startsWith("{") &&
+            !text.startsWith("[")
+    }
+
+    fun finalPromptOrNull(prompt: String, maxLength: Int): String? = prompt.trim()
+        .takeIf { it.length <= maxLength && isAcceptable(it) }
+
+    private val LATIN_WORD = Regex("[A-Za-z]{3,}")
+    private val CJK = Regex("[\\u3400-\\u9FFF]")
+    private val MARKDOWN_SYNTAX = Regex("(?m)^\\s*(#{1,6}\\s|[-*+]\\s)|\\*\\*|__")
+}

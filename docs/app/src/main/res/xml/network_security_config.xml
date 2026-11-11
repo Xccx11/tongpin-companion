@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+        Allow cleartext (HTTP/WS) for all connections.
+        同频可能连接用户自定义的本地兼容服务。Android 的 domain-config
+        cannot match IP address ranges (192.168.x.x, 10.x.x.x, 100.x.x.x).
+        The app itself warns about insecure connections and prefers wss:// / https://.
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

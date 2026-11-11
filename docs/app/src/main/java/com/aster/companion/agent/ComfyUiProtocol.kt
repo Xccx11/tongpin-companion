@@ -1,0 +1,139 @@
+package com.aster.companion.agent
+
+import com.aster.companion.data.ModelProfileEntity
+import java.net.URI
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
+enum class ComfyUiWorkflow {
+    QWEN_IMAGE_EDIT,
+    ILLUSTRIOUS_XL_REFERENCE
+}
+
+/** Keeps DeepSeek's final prompt syntax aligned with the active local renderer. */
+object ComfyUiPromptSyntax {
+    fun draftRequirements(profile: ModelProfileEntity?): String = if (ComfyUiProtocol.usesSdXlPromptSyntax(profile)) {
+        """
+            The selected renderer is Illustrious XL / SDXL. Return the final production prompt in English only.
+            Write a single detailed comma-separated SDXL illustration prompt using clear natural language plus stable visual tags.
+            Keep it a positive prompt only: do not output a negative prompt, markdown, JSON, headings, translations, or commentary.
+        """.trimIndent()
+    } else {
+        """
+            The selected renderer is Qwen Image Edit. Return the final production prompt in Chinese only.
+            Keep it a direct, detailed editing instruction without markdown, JSON, headings, negative prompt, or commentary.
+        """.trimIndent()
+    }
+}
+
+/** Pure ComfyUI endpoint and history parsing. The workflow itself remains unchanged. */
+object ComfyUiProtocol {
+    const val QWEN_IMAGE_EDIT_MODEL_NAME = "comfyui-qwen-image-edit-2509"
+    const val ILLUSTRIOUS_XL_MODEL_NAME = "comfyui-illustrious-xl-v2-reference"
+    const val ILLUSTRIOUS_XL_CHECKPOINT_NAME = "Illustrious-XL-v2.0.safetensors"
+    const val MODEL_NAME = QWEN_IMAGE_EDIT_MODEL_NAME
+    private const val OUTPUT_NODE = "60"
+
+    fun supports(profile: ModelProfileEntity): Boolean =
+        ImageProviderProtocolResolver.resolve(profile) == ImageProviderProtocol.COMFY_UI
+
+    fun workflow(profile: ModelProfileEntity): ComfyUiWorkflow = when (profile.modelName.trim().lowercase()) {
+        ILLUSTRIOUS_XL_MODEL_NAME -> ComfyUiWorkflow.ILLUSTRIOUS_XL_REFERENCE
+        else -> ComfyUiWorkflow.QWEN_IMAGE_EDIT
+    }
+
+    fun usesSdXlPromptSyntax(profile: ModelProfileEntity?): Boolean =
+        profile != null && workflow(profile) == ComfyUiWorkflow.ILLUSTRIOUS_XL_REFERENCE
+
+    fun promptEndpoint(profile: ModelProfileEntity): String = root(profile) + "/prompt"
+
+    fun uploadEndpoint(profile: ModelProfileEntity): String = root(profile) + "/upload/image"
+
+    fun historyEndpoint(profile: ModelProfileEntity, promptId: String): String = root(profile) + "/history/$promptId"
+
+    fun queueEndpoint(profile: ModelProfileEntity): String = root(profile) + "/queue"
+
+    fun checkpointLoaderInfoEndpoint(profile: ModelProfileEntity): String =
+        root(profile) + "/object_info/CheckpointLoaderSimple"
+
+    fun objectInfoEndpoint(profile: ModelProfileEntity): String = root(profile) + "/object_info"
+
+    fun requiredCheckpointIsAvailable(profile: ModelProfileEntity, checkpointLoaderInfo: String): Boolean {
+        if (workflow(profile) != ComfyUiWorkflow.ILLUSTRIOUS_XL_REFERENCE) return true
+        val names = runCatching {
+            Json.parseToJsonElement(checkpointLoaderInfo).jsonObject
+                .getValue("CheckpointLoaderSimple").jsonObject
+                .getValue("input").jsonObject
+                .getValue("required").jsonObject
+                .getValue("ckpt_name").jsonArray
+                .first().jsonArray
+                .mapNotNull { it.jsonPrimitive.contentOrNull }
+        }.getOrDefault(emptyList())
+        return ILLUSTRIOUS_XL_CHECKPOINT_NAME in names
+    }
+
+    fun illustriousStyleWorkflowNodesAvailable(objectInfo: String): Boolean {
+        val availableNodes = runCatching {
+            Json.parseToJsonElement(objectInfo).jsonObject.keys
+        }.getOrDefault(emptySet())
+        return setOf("IPAdapterUnifiedLoader", "IPAdapterAdvanced").all(availableNodes::contains)
+    }
+
+    fun promptId(responseBody: String): String = Json.parseToJsonElement(responseBody).jsonObject
+        .get("prompt_id")?.jsonPrimitive?.contentOrNull
+        ?: throw IllegalStateException("ComfyUI did not return a prompt id")
+
+    fun isFailed(promptId: String, historyBody: String): Boolean {
+        val entry = historyEntry(promptId, historyBody) ?: return false
+        return entry["status"]?.jsonObject?.get("status_str")?.jsonPrimitive?.contentOrNull
+            ?.lowercase() in setOf("error", "failed", "cancelled", "canceled")
+    }
+
+    fun outputImageUrl(profile: ModelProfileEntity, promptId: String, historyBody: String): String {
+        val image = historyEntry(promptId, historyBody)
+            ?.get("outputs")?.jsonObject
+            ?.get(OUTPUT_NODE)?.jsonObject
+            ?.get("images")?.jsonArray
+            ?.firstOrNull()?.jsonObject
+            ?: throw IllegalStateException("ComfyUI task has not produced an image yet")
+        val filename = image["filename"]?.jsonPrimitive?.contentOrNull
+            ?: throw IllegalStateException("ComfyUI output image has no filename")
+        val subfolder = image["subfolder"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val type = image["type"]?.jsonPrimitive?.contentOrNull ?: "output"
+        return root(profile) + "/view?filename=${encode(filename)}&subfolder=${encode(subfolder)}&type=${encode(type)}"
+    }
+
+    private fun historyEntry(promptId: String, historyBody: String) =
+        Json.parseToJsonElement(historyBody).jsonObject[promptId]?.jsonObject
+
+    fun normalizedBaseUrl(value: String): String {
+        val entered = value.trim().trimEnd('/')
+        if (entered.isBlank()) return entered
+        val withScheme = if (entered.startsWith("http://", ignoreCase = true) || entered.startsWith("https://", ignoreCase = true)) {
+            entered
+        } else {
+            "http://$entered"
+        }
+        val uri = runCatching { URI(withScheme) }.getOrNull() ?: return withScheme
+        if (uri.host.isNullOrBlank() || uri.port != -1) return withScheme
+        val path = uri.rawPath?.takeIf { it.isNotBlank() }.orEmpty()
+        val query = uri.rawQuery?.let { "?$it" }.orEmpty()
+        return "${uri.scheme}://${uri.host}:8188$path$query"
+    }
+
+    fun isValidBaseUrl(value: String): Boolean = runCatching {
+        val uri = URI(normalizedBaseUrl(value))
+        uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()
+    }.getOrDefault(false)
+
+    private fun root(profile: ModelProfileEntity): String = normalizedBaseUrl(com.aster.companion.net.EndpointResolver.cachedBaseUrl(profile.id, profile.baseUrl))
+
+    private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
+
+    private val supportedModelNames = setOf(QWEN_IMAGE_EDIT_MODEL_NAME, ILLUSTRIOUS_XL_MODEL_NAME)
+}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Aster" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@color/tongpin_launcher_background</item>
+        <item name="android:navigationBarColor">@color/tongpin_launcher_background</item>
+        <item name="android:windowBackground">@color/tongpin_launcher_background</item>
+    </style>
+
+    <style name="Theme.Aster.Splash" parent="Theme.Aster">
+        <item name="android:windowSplashScreenBackground">@color/tongpin_splash_background</item>
+    </style>
+
+    <style name="Theme.Aster.Transparent" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.5</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

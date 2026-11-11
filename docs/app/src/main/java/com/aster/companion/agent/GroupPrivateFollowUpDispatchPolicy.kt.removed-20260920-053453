@@ -1,0 +1,8 @@
+package com.aster.companion.agent
+
+import com.aster.companion.domain.ConversationType
+
+object GroupPrivateFollowUpDispatchPolicy {
+    fun shouldDispatchImmediately(conversationType: ConversationType, targetCharacterIds: List<String>): Boolean =
+        conversationType == ConversationType.GROUP && targetCharacterIds.isNotEmpty()
+}

@@ -1,0 +1,51 @@
+package com.aster.companion.agent.life
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * 「对话 → 胶囊」本地对齐规则：只认明确说法，读不出来就不许乱改。
+ */
+class LifeConversationSyncPolicyTest {
+
+    @Test
+    fun `读出地点与动作并拼成带「在」前缀的活动文本`() {
+        val hint = LifeConversationSyncPolicy.parse("我在浴室，洗澡呢，等我一下")!!
+
+        assertEquals("浴室", hint.location)
+        assertEquals("洗澡", hint.action)
+        assertEquals("在浴室，洗澡", LifeConversationSyncPolicy.composeActivity(hint.location, hint.action))
+    }
+
+    @Test
+    fun `只说动作时沿用上一轮的地点`() {
+        val previous = "在卧室，看书"
+        val hint = LifeConversationSyncPolicy.parse("我去洗澡了")!!
+
+        assertEquals("卧室", LifeConversationSyncPolicy.locationHeadOf(previous))
+        assertEquals("在卧室，洗澡", LifeConversationSyncPolicy.composeActivity("卧室", hint.action))
+    }
+
+    @Test
+    fun `说要睡了会被识别`() {
+        assertTrue(LifeConversationSyncPolicy.parse("我先睡啦，晚安")!!.sleepNow)
+    }
+
+    @Test
+    fun `闲聊聊不出状态时不乱改胶囊`() {
+        assertNull(LifeConversationSyncPolicy.parse("你今天怎么想起找我了"))
+        assertNull(LifeConversationSyncPolicy.parse("嗯嗯"))
+        // 「在忙」不是地点：不能被当成"她在家/在某个地方"。
+        val busy = LifeConversationSyncPolicy.parse("在忙，等下说")
+        assertNull(busy?.location)
+    }
+
+    @Test
+    fun `地点解析只取「在X，Y」的 X`() {
+        assertEquals("图书馆", LifeConversationSyncPolicy.locationHeadOf("在图书馆，靠窗翻书"))
+        assertEquals("家", LifeConversationSyncPolicy.locationHeadOf("在家"))
+        assertNull(LifeConversationSyncPolicy.locationHeadOf(""))
+    }
+}

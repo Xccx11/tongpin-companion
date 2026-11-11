@@ -1,0 +1,14 @@
+package com.aster.companion.agent
+
+import com.aster.companion.domain.ConversationType
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class GroupPrivateFollowUpDispatchPolicyTest {
+    @Test
+    fun `named private request is immediate only from a group`() {
+        assertTrue(GroupPrivateFollowUpDispatchPolicy.shouldDispatchImmediately(ConversationType.GROUP, listOf("lin")))
+        assertFalse(GroupPrivateFollowUpDispatchPolicy.shouldDispatchImmediately(ConversationType.PRIVATE, listOf("lin")))
+    }
+}

@@ -1,0 +1,158 @@
+package com.aster.companion.data
+
+import androidx.room.withTransaction
+import com.aster.companion.domain.ConversationType
+import com.aster.companion.domain.MemoryKind
+import com.aster.companion.media.CompanionPrivateImageStore
+import android.util.Base64
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import java.io.InputStream
+import java.io.OutputStream
+import javax.inject.Inject
+import javax.inject.Singleton
+
+@Serializable
+private data class CompanionBackup(
+    val version: Int = 2,
+    val createdAt: Long,
+    val characters: List<BackupCharacter>,
+    val threads: List<BackupThread>,
+    val participants: List<BackupParticipant>,
+    val messages: List<BackupMessage>,
+    val memories: List<BackupMemory>,
+    val diaryPhotos: List<BackupDiaryPhoto> = emptyList(),
+    val momentPosts: List<BackupMomentPost> = emptyList(),
+    val momentMedia: List<BackupMomentMedia> = emptyList(),
+    val momentReactions: List<BackupMomentReaction> = emptyList(),
+    val momentComments: List<BackupMomentComment> = emptyList(),
+    val livingStates: List<BackupLivingState> = emptyList(),
+    val lifeStates: List<BackupLifeState> = emptyList(),
+    val personalities: List<BackupPersonality> = emptyList(),
+    val threadSummaries: List<BackupThreadSummary> = emptyList(),
+    val worldStates: List<BackupWorldState> = emptyList(),
+    val semanticMemories: List<BackupSemanticMemory> = emptyList(),
+    val assets: List<BackupAsset> = emptyList()
+)
+
+@Serializable private data class BackupCharacter(val id: String, val name: String, val avatarUri: String? = null, val personalityPrompt: String, val appearancePrompt: String, val referenceImageUri: String?, val createdAt: Long, val updatedAt: Long, val styleReferenceImageUri: String? = null, val relationshipPrompt: String = "")
+@Serializable private data class BackupThread(val id: String, val type: String, val title: String, val createdAt: Long, val updatedAt: Long, val contextVersion: Long = 0, val memorySince: Long = 0)
+@Serializable private data class BackupParticipant(val threadId: String, val characterId: String, val ordinal: Int)
+@Serializable private data class BackupMessage(val id: String, val threadId: String, val characterId: String?, val body: String, val imageUri: String?, val fromUser: Boolean, val createdAt: Long, val readAt: Long? = null)
+@Serializable private data class BackupMemory(val id: String, val characterId: String?, val threadId: String?, val kind: String, val content: String, val blockedFromMention: Boolean, val createdAt: Long, val updatedAt: Long)
+@Serializable private data class BackupDiaryPhoto(val id: String, val characterId: String, val threadId: String, val imageUri: String, val createdAt: Long)
+@Serializable private data class BackupMomentPost(val id: String, val authorType: String, val authorCharacterId: String?, val body: String, val visibility: String, val source: String, val status: String, val createdAt: Long, val updatedAt: Long)
+@Serializable private data class BackupMomentMedia(val postId: String, val ordinal: Int, val imageUri: String, val source: String)
+@Serializable private data class BackupMomentReaction(val postId: String, val actorType: String, val actorId: String, val kind: String, val createdAt: Long)
+@Serializable private data class BackupMomentComment(val id: String, val postId: String, val authorType: String, val authorCharacterId: String?, val body: String, val replyToCommentId: String?, val createdAt: Long)
+@Serializable private data class BackupAsset(val sourceUri: String, val contentType: String, val bytesBase64: String)
+
+/** 她此刻在做什么/心情/作息——属于"角色内容"，不属于机型配置，所以跟着加密备份一起走。 */
+@Serializable private data class BackupLivingState(val characterId: String, val mood: String, val currentActivity: String, val activityStartedAt: Long, val sleepUntil: Long?, val scheduleJson: String, val updatedAt: Long, val locationId: String = "home.unknown", val evidence: String = "")
+
+/** 自主生活数值（能量/压力/孤独/社交需求/目标）。 */
+@Serializable private data class BackupLifeState(val characterId: String, val energy: Int = 80, val stress: Int = 40, val loneliness: Int = 30, val socialNeed: Int = 40, val currentGoal: String = "", val hiddenGoal: String = "", val updatedAt: Long = 0L)
+
+/** 人格权重与核心描述。 */
+@Serializable private data class BackupPersonality(val characterId: String, val care: Int = 50, val initiative: Int = 50, val conversation: Int = 50, val independence: Int = 50, val warmth: Int = 50, val coreDescription: String = "", val behaviorTendency: String = "", val updatedAt: Long = 0L)
+
+/** 会话滚动总结（窗口外历史压缩成的摘要）。 */
+@Serializable private data class BackupThreadSummary(val threadId: String, val role: String, val summary: String, val summarizedUpToMessageId: String?, val updatedAt: Long)
+
+/**
+ * 世界状态里真正影响对话的那几种：悄悄话 `STEALTH_MODE`、家庭引导 `FAMILY_GUIDE`、
+ * 刚给她看过的照片 `LAST_PHOTO`、上一次出图的画面 `LAST_SCENE`、注入用的 `SYNCED_CONTEXT`。
+ * 不备份的话，恢复后悄悄话会自己关掉、模型也不再知道"我刚给他看过什么"。
+ */
+@Serializable private data class BackupWorldState(val id: String, val characterId: String?, val threadId: String?, val scope: String, val content: String, val updatedAt: Long)
+
+/** 长期语义记忆（含向量）。丢了等于她忘记跟你聊过的那些具体的事。 */
+@Serializable private data class BackupSemanticMemory(val id: String, val characterId: String?, val threadId: String?, val timelineEventId: String?, val content: String, val embeddingBase64: String?, val importance: Int, val retrievable: Boolean, val createdAt: Long, val updatedAt: Long)
+
+/**
+ * 加密备份：导出**全部角色内容**（角色本体、对话、记忆、日记、朋友圈，以及她此刻的状态、
+ * 世界状态、长期语义记忆、会话摘要）。模型配置与所有 API Key 刻意排除在外 —— 那属于机型配置，
+ * 换机要重新填。
+ */
+@Singleton
+class CompanionBackupManager @Inject constructor(
+    private val database: CompanionDatabase,
+    private val dao: CompanionDao,
+    private val cipher: CompanionBackupCipher = CompanionBackupCipher(),
+    private val privateImageStore: CompanionPrivateImageStore
+) {
+    suspend fun export(output: OutputStream, password: String) {
+        val imageUris = imageUrisForBackup()
+        require(imageUris.size <= MAX_ASSETS) { "Backup contains too many images" }
+        val assets = imageUris.map { sourceUri ->
+            val image = privateImageStore.read(sourceUri).getOrThrow()
+            BackupAsset(sourceUri, image.contentType, Base64.encodeToString(image.bytes, Base64.NO_WRAP))
+        }
+        val payload = CompanionBackup(
+            createdAt = System.currentTimeMillis(),
+            characters = dao.allCharacters().map { BackupCharacter(it.id, it.name, it.avatarUri, it.personalityPrompt, it.appearancePrompt, it.referenceImageUri, it.createdAt, it.updatedAt, it.styleReferenceImageUri, it.relationshipPrompt) },
+            threads = dao.allThreads().map { BackupThread(it.id, it.type.name, it.title, it.createdAt, it.updatedAt, it.contextVersion, it.memorySince) },
+            participants = dao.allParticipants().map { BackupParticipant(it.threadId, it.characterId, it.ordinal) },
+            messages = dao.allMessages().map { BackupMessage(it.id, it.threadId, it.characterId, it.body, it.imageUri, it.fromUser, it.createdAt, it.readAt) },
+            memories = dao.allMemories().map { BackupMemory(it.id, it.characterId, it.threadId, it.kind.name, it.content, it.blockedFromMention, it.createdAt, it.updatedAt) },
+            diaryPhotos = dao.allDiaryPhotos().map { BackupDiaryPhoto(it.id, it.characterId, it.threadId, it.imageUri, it.createdAt) },
+            momentPosts = dao.allMomentPosts().map { BackupMomentPost(it.id, it.authorType, it.authorCharacterId, it.body, it.visibility, it.source, it.status, it.createdAt, it.updatedAt) },
+            momentMedia = dao.allMomentMedia().map { BackupMomentMedia(it.postId, it.ordinal, it.imageUri, it.source) },
+            momentReactions = dao.allMomentReactions().map { BackupMomentReaction(it.postId, it.actorType, it.actorId, it.kind, it.createdAt) },
+            momentComments = dao.allMomentComments().map { BackupMomentComment(it.id, it.postId, it.authorType, it.authorCharacterId, it.body, it.replyToCommentId, it.createdAt) },
+            livingStates = dao.allLivingStates().map { BackupLivingState(it.characterId, it.mood, it.currentActivity, it.activityStartedAt, it.sleepUntil, it.scheduleJson, it.updatedAt, it.locationId, it.evidence) },
+            lifeStates = dao.allLifeStates().map { BackupLifeState(it.characterId, it.energy, it.stress, it.loneliness, it.socialNeed, it.currentGoal, it.hiddenGoal, it.updatedAt) },
+            personalities = dao.allPersonalities().map { BackupPersonality(it.characterId, it.care, it.initiative, it.conversation, it.independence, it.warmth, it.coreDescription, it.behaviorTendency, it.updatedAt) },
+            threadSummaries = dao.allThreadSummaries().map { BackupThreadSummary(it.threadId, it.role, it.summary, it.summarizedUpToMessageId, it.updatedAt) },
+            worldStates = dao.allWorldStates().map { BackupWorldState(it.id, it.characterId, it.threadId, it.scope, it.content, it.updatedAt) },
+            semanticMemories = dao.allSemanticMemories().map { BackupSemanticMemory(it.id, it.characterId, it.threadId, it.timelineEventId, it.content, it.embedding?.let { bytes -> Base64.encodeToString(bytes, Base64.NO_WRAP) }, it.importance, it.retrievable, it.createdAt, it.updatedAt) },
+            assets = assets
+        )
+        output.use { it.write(cipher.encrypt(json.encodeToString(CompanionBackup.serializer(), payload).toByteArray(Charsets.UTF_8), password)) }
+    }
+
+    suspend fun import(input: InputStream, password: String) {
+        val backup = json.decodeFromString(CompanionBackup.serializer(), cipher.decrypt(input.use { it.readBytes() }, password).toString(Charsets.UTF_8))
+        require(backup.version in 1..2) { "Unsupported backup version" }
+        require(backup.characters.size <= MAX_ITEMS && backup.threads.size <= MAX_ITEMS && backup.messages.size <= MAX_ITEMS * 100) { "Backup is too large" }
+        require(backup.assets.size <= MAX_ASSETS) { "Backup contains too many images" }
+        val restoredAssets = backup.assets.associate { asset ->
+            val bytes = Base64.decode(asset.bytesBase64, Base64.DEFAULT)
+            privateImageStore.save(bytes.inputStream(), asset.contentType).getOrThrow().let { asset.sourceUri to it }
+        }
+        fun resolve(uri: String?): String? = uri?.let { restoredAssets[it] ?: it }
+        database.withTransaction {
+            backup.characters.forEach { dao.upsertCharacter(CharacterEntity(it.id, it.name, resolve(it.avatarUri), it.personalityPrompt, it.appearancePrompt, resolve(it.referenceImageUri), it.createdAt, it.updatedAt, resolve(it.styleReferenceImageUri), it.relationshipPrompt)) }
+            backup.threads.forEach { dao.upsertThread(ThreadEntity(it.id, ConversationType.valueOf(it.type), it.title, it.createdAt, it.updatedAt, it.contextVersion, it.memorySince.takeIf { ms -> ms > 0 } ?: it.createdAt)) }
+            backup.participants.forEach { dao.upsertParticipant(ThreadParticipantEntity(it.threadId, it.characterId, it.ordinal)) }
+            backup.messages.forEach { dao.insertMessage(MessageEntity(it.id, it.threadId, it.characterId, it.body, resolve(it.imageUri), it.fromUser, it.createdAt, it.readAt)) }
+            backup.memories.forEach { dao.upsertMemory(MemoryEntity(it.id, it.characterId, it.threadId, MemoryKind.valueOf(it.kind), it.content, it.blockedFromMention, it.createdAt, it.updatedAt)) }
+            backup.diaryPhotos.forEach { dao.insertDiaryPhoto(DiaryPhotoEntity(it.id, it.characterId, it.threadId, resolve(it.imageUri) ?: it.imageUri, it.createdAt)) }
+            backup.momentPosts.forEach { dao.upsertMomentPost(MomentPostEntity(it.id, it.authorType, it.authorCharacterId, it.body, it.visibility, it.source, it.status, it.createdAt, it.updatedAt)) }
+            backup.momentMedia.forEach { dao.upsertMomentMedia(MomentMediaEntity(it.postId, it.ordinal, resolve(it.imageUri) ?: it.imageUri, it.source)) }
+            backup.momentReactions.forEach { dao.upsertMomentReaction(MomentReactionEntity(it.postId, it.actorType, it.actorId, it.kind, it.createdAt)) }
+            backup.momentComments.forEach { dao.insertMomentComment(MomentCommentEntity(it.id, it.postId, it.authorType, it.authorCharacterId, it.body, it.replyToCommentId, it.createdAt)) }
+            backup.livingStates.forEach { dao.upsertLivingState(CharacterLivingStateEntity(it.characterId, it.mood, it.currentActivity, it.activityStartedAt, it.sleepUntil, it.scheduleJson, it.updatedAt, it.locationId, it.evidence)) }
+            backup.lifeStates.forEach { dao.upsertCharacterLifeState(CharacterLifeStateEntity(it.characterId, it.energy, it.stress, it.loneliness, it.socialNeed, it.currentGoal, it.hiddenGoal, it.updatedAt)) }
+            backup.personalities.forEach { dao.upsertPersonality(CharacterPersonalityEntity(it.characterId, it.care, it.initiative, it.conversation, it.independence, it.warmth, it.coreDescription, it.behaviorTendency, it.updatedAt)) }
+            backup.threadSummaries.forEach { dao.upsertThreadSummary(ThreadSummaryEntity(it.threadId, it.role, it.summary, it.summarizedUpToMessageId, it.updatedAt)) }
+            backup.worldStates.forEach { dao.upsertWorldState(WorldStateEntity(it.id, it.characterId, it.threadId, it.scope, it.content, it.updatedAt)) }
+            backup.semanticMemories.forEach { dao.upsertSemanticMemory(SemanticMemoryEntity(it.id, it.characterId, it.threadId, it.timelineEventId, it.content, it.embeddingBase64?.let { encoded -> Base64.decode(encoded, Base64.NO_WRAP) }, it.importance, it.retrievable, it.createdAt, it.updatedAt)) }
+        }
+    }
+
+    private suspend fun imageUrisForBackup(): List<String> = buildList {
+        dao.allCharacters().forEach { character ->
+            listOfNotNull(character.avatarUri, character.referenceImageUri, character.styleReferenceImageUri).forEach(::add)
+        }
+        dao.allMessages().mapNotNullTo(this) { it.imageUri }
+        dao.allDiaryPhotos().mapTo(this) { it.imageUri }
+        dao.allMomentMedia().mapTo(this) { it.imageUri }
+    }.filter(String::isNotBlank).distinct()
+
+    private companion object {
+        val json = Json { ignoreUnknownKeys = false }
+        const val MAX_ITEMS = 10_000
+        const val MAX_ASSETS = 2_000
+    }
+}

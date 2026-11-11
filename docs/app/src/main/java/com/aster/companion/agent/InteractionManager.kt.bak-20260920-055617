@@ -1,0 +1,178 @@
+package com.aster.companion.agent
+
+import com.aster.companion.data.ActivityEntity
+import com.aster.companion.data.CompanionDao
+import com.aster.companion.data.InteractionRequestEntity
+import com.aster.companion.data.MemoryEntity
+import com.aster.companion.data.RelationshipEntity
+import com.aster.companion.domain.MemoryKind
+import java.util.UUID
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
+/**
+ * v2.1 互动请求系统：处理 SocialEngine 创建的 pending 请求 → 目标角色回应（接受/拒绝/延迟）→
+ * 接受则创建共同活动 + 更新五维关系 + 写入记忆。数值由代码计算，DeepSeek 只判断角色心理。
+ */
+@Singleton
+class InteractionManager @Inject constructor(
+    private val dao: CompanionDao,
+    private val client: OpenAiCompatibleClient,
+    private val secretCipher: com.aster.companion.data.CompanionSecretCipher,
+    private val cognitionEngine: CharacterCognitionEngine
+) {
+    /** 处理所有未过期的 pending 请求。 */
+    suspend fun processPendingRequests(now: Long) {
+        dao.pendingInteractionRequests(now).forEach { request ->
+            runCatching { processRequest(request, now) }
+        }
+    }
+
+    private suspend fun processRequest(request: InteractionRequestEntity, now: Long) {
+        val sender = dao.character(request.senderCharacterId) ?: return
+        val receiver = dao.character(request.receiverCharacterId) ?: return
+        val response = decideResponse(request, receiver, sender) ?: return
+        when (response) {
+            "accept" -> accept(request, sender.name, receiver.name, now)
+            "reject" -> reject(request, now)
+            "delay" -> delay(request, now)
+        }
+    }
+
+    /** 目标角色回应（认知心理权衡：内心矛盾后 accept/reject/delay）。busy/深夜作为现实约束注入。 */
+    private suspend fun decideResponse(
+        request: InteractionRequestEntity,
+        receiver: com.aster.companion.data.CharacterEntity,
+        sender: com.aster.companion.data.CharacterEntity
+    ): String? {
+        val living = dao.livingState(receiver.id)
+        val busy = living?.currentActivity?.contains("工作") == true || living?.currentActivity?.contains("学习") == true
+        val sleeping = living?.sleepUntil?.let { System.currentTimeMillis() < it } == true
+        val relation = dao.relationship(receiver.id, sender.id)
+        val acceptCandidates = listOf(
+            com.aster.companion.domain.CandidateAction("accept", "social", "接受邀请", "character"),
+            com.aster.companion.domain.CandidateAction("reject", "social", "婉拒", "character"),
+            com.aster.companion.domain.CandidateAction("delay", "social", "晚点再去", "character")
+        )
+        val trigger = buildString {
+            append("${sender.name}邀请你${request.action}（理由：${request.reason}）。")
+            if (busy) append("你正在${living?.currentActivity}（重要任务中）。")
+            if (sleeping) append("你正在睡觉。")
+            append("你和${sender.name}关系：亲密度 ${relation?.affection ?: 50}。")
+        }
+        val result = cognitionEngine.cognize(
+            characterId = receiver.id,
+            candidates = acceptCandidates,
+            triggerContext = trigger.toString()
+        ) ?: return null
+        val response = result.action.lowercase()
+        if (response !in setOf("accept", "reject", "delay")) return null
+        // 现实约束硬兜底：睡眠中强制 delay（不能打扰）
+        if (sleeping && response == "accept") return "delay"
+        runCatching { cognitionEngine.recordSummary(receiver.id, result, System.currentTimeMillis()) }
+        return response
+    }
+
+    /** 接受：创建共同活动 + 关系加分 + 记忆。 */
+    private suspend fun accept(request: InteractionRequestEntity, senderName: String, receiverName: String, now: Long) {
+        dao.updateInteractionRequestStatus(request.id, "accepted", now)
+        // 共同活动（ActivityManager Phase 4 接生命周期；这里先建 running）
+        val location = when (request.action) {
+            "watch_tv" -> "客厅"
+            "stroll" -> "小区里"
+            "game" -> "客厅"
+            "meal_remind", "help", "care" -> "家里"
+            else -> "家里"
+        }
+        val participants = buildJsonObject {
+            put("sender", request.senderCharacterId)
+            put("receiver", request.receiverCharacterId)
+        }.toString()
+        dao.upsertActivity(
+            ActivityEntity(
+                id = "activity:${UUID.randomUUID()}",
+                type = request.action,
+                participantsJson = participants,
+                location = location,
+                durationMinutes = if (request.action in setOf("watch_tv", "stroll", "game")) 60 else 20,
+                status = "running",
+                startedAt = now,
+                finishedAt = null,
+                effectJson = "",
+                createdAt = now
+            )
+        )
+        // 关系变化（代码数值）：接受 → 亲密度/信任/理解小幅上升
+        updateRelationship(request.senderCharacterId, request.receiverCharacterId, affection = +2, trust = +1, understanding = +1, now = now)
+        updateRelationship(request.receiverCharacterId, request.senderCharacterId, affection = +1, trust = +1, now = now)
+        // 记忆：互动事件（含影响）
+        val memory = "$senderName 邀请$receiverName${actionLabel(request.action)}（$senderName 想${request.reason}），$receiverName 答应了。"
+        dao.upsertMemory(
+            MemoryEntity(
+                id = "memory:interact:${UUID.randomUUID()}",
+                characterId = request.receiverCharacterId,
+                threadId = null,
+                kind = MemoryKind.EVENT,
+                content = memory,
+                blockedFromMention = false,
+                createdAt = now,
+                updatedAt = now
+            )
+        )
+    }
+
+    private suspend fun reject(request: InteractionRequestEntity, now: Long) {
+        dao.updateInteractionRequestStatus(request.id, "rejected", now)
+        // 拒绝 → 轻微冲突上升
+        updateRelationship(request.receiverCharacterId, request.senderCharacterId, conflict = +1, now = now)
+    }
+
+    private suspend fun delay(request: InteractionRequestEntity, now: Long) {
+        // 延迟：保持 pending，延长过期时间
+        dao.upsertInteractionRequest(request.copy(expireAt = now + DELAY_EXTEND_MS, updatedAt = now))
+    }
+
+    /** 五维关系数值更新（代码负责数值；双向各一条）。 */
+    private suspend fun updateRelationship(
+        aId: String,
+        bId: String,
+        affection: Int = 0,
+        trust: Int = 0,
+        dependence: Int = 0,
+        understanding: Int = 0,
+        conflict: Int = 0,
+        now: Long
+    ) {
+        val existing = dao.relationship(aId, bId)
+        val base = existing ?: RelationshipEntity(aId, bId, updatedAt = now)
+        dao.upsertRelationship(
+            base.copy(
+                affection = (base.affection + affection).coerceIn(0, 100),
+                trust = (base.trust + trust).coerceIn(0, 100),
+                dependence = (base.dependence + dependence).coerceIn(0, 100),
+                understanding = (base.understanding + understanding).coerceIn(0, 100),
+                conflict = (base.conflict + conflict).coerceIn(0, 100),
+                updatedAt = now
+            )
+        )
+    }
+
+    private fun actionLabel(action: String): String = when (action) {
+        "watch_tv" -> "一起看电视"
+        "game" -> "一起打游戏"
+        "stroll" -> "一起去散步"
+        "chat" -> "聊聊天"
+        "vent" -> "说说心里话"
+        "comfort" -> "安慰她"
+        "meal_remind" -> "提醒她吃饭"
+        "help" -> "帮个忙"
+        "care" -> "关心一下"
+        else -> "做点什么"
+    }
+
+    companion object {
+        const val DELAY_EXTEND_MS = 30 * 60 * 1000L
+    }
+}

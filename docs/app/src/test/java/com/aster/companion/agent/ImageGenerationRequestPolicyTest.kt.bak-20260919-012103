@@ -1,0 +1,40 @@
+package com.aster.companion.agent
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class ImageGenerationRequestPolicyTest {
+    @Test
+    fun `uses documented 768 square default and accepts a size override`() {
+        assertEquals("768x768", ImageGenerationRequestPolicy.normalizeSize(null))
+        assertEquals("512x768", ImageGenerationRequestPolicy.normalizeSize("512x768"))
+        assertEquals("1536x1024", ImageGenerationRequestPolicy.normalizeSize("1536x1024"))
+    }
+
+    @Test
+    fun `invalid or unsafe image sizes fall back to the documented default`() {
+        assertEquals("768x768", ImageGenerationRequestPolicy.normalizeSize("1024*1024"))
+        assertEquals("768x768", ImageGenerationRequestPolicy.normalizeSize("2048x2048"))
+        assertEquals("768x768", ImageGenerationRequestPolicy.normalizeSize("9999x9999"))
+        assertEquals("768x768", ImageGenerationRequestPolicy.normalizeSize(""))
+    }
+
+    @Test
+    fun `standard gateway payload requests base64 png with the normalized size`() {
+        val payload = Json.parseToJsonElement(
+            ImageGenerationRequestPolicy.payload(
+                modelName = "wai-nsfw-illustrious",
+                prompt = "one woman reading by a warm window",
+                size = "512x768"
+            )
+        ).jsonObject
+
+        assertEquals("wai-nsfw-illustrious", payload["model"]?.jsonPrimitive?.content)
+        assertEquals("one woman reading by a warm window", payload["prompt"]?.jsonPrimitive?.content)
+        assertEquals("512x768", payload["size"]?.jsonPrimitive?.content)
+        assertEquals("b64_json", payload["response_format"]?.jsonPrimitive?.content)
+    }
+}

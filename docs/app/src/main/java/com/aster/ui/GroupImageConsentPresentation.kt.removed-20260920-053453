@@ -1,0 +1,15 @@
+package com.aster.ui
+
+/** Builds the human-readable image approval text shown for a group image action. */
+object GroupImageConsentPresentation {
+    fun summary(mode: String, participantNames: List<String>): String {
+        val names = participantNames.map(String::trim).filter(String::isNotBlank)
+        require(names.isNotEmpty()) { "At least one participant name is required" }
+        return when (mode.trim().uppercase()) {
+            "SINGLE" -> "${names.first()}发一张自己的照片"
+            "SEPARATE" -> "${names.joinToString("、")}分别发自己的照片"
+            "TOGETHER" -> "${names.joinToString("和")}一起拍一张合照"
+            else -> "${names.joinToString("、")}想发照片"
+        }
+    }
+}

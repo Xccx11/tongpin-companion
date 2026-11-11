@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">同频</string>
+    <string name="accessibility_service_description">同频仅在你确认的界面动作中使用无障碍服务。</string>
+
+    <!-- Connection -->
+    <string name="connect_title">连接</string>
+    <string name="server_host">服务地址</string>
+    <string name="server_port">端口</string>
+    <string name="connect">连接</string>
+    <string name="connecting">正在连接</string>
+    <string name="disconnect">断开连接</string>
+
+    <!-- Status -->
+    <string name="status_connected">已连接</string>
+    <string name="status_disconnected">未连接</string>
+    <string name="status_pending">等待确认</string>
+    <string name="status_rejected">已拒绝</string>
+
+    <!-- Permissions -->
+    <string name="permissions_title">权限</string>
+    <string name="permission_granted">已授予</string>
+    <string name="permission_denied">未授予</string>
+    <string name="grant_permission">授予</string>
+
+    <!-- Notifications -->
+    <string name="notification_channel_name">同频系统服务</string>
+    <string name="notification_channel_description">维持同频的主动陪伴</string>
+    <string name="notification_title">同频已开启</string>
+    <string name="notification_text_connected">服务已连接</string>
+    <string name="notification_text_disconnected">服务已断开</string>
+
+    <!-- IPC -->
+    <string name="ipc_service_description">同频本地能力服务</string>
+
+    <string name="companion_approval_title">同频陪伴</string>
+    <string name="companion_approval_body">同频陪伴服务。</string>
+    <string name="companion_approval_open">打开同频</string>
+    <string name="companion_overlay_permission_hint">请在列表中选择同频以授予悬浮窗权限。</string>
+</resources>

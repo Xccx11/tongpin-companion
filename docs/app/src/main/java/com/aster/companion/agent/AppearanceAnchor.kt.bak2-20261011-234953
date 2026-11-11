@@ -1,0 +1,95 @@
+package com.aster.companion.agent
+
+/**
+ * 外貌锚点的**硬保证**：把用户写的外貌原文一字不改拼在最终提示词的最前面。
+ *
+ * 为什么不让模型转述：krea2 要英文提示词，于是 pass2 必须把用户的中文外貌档案「译写」一遍，
+ * 而译写必然丢细节——实测 254 的出图里「22 岁」写成了 `28-year-old`、整段妆容消失、
+ * 腰肢/胸/臀全丢。用户的原话是「外貌设定词不准更改」，所以外貌只能由代码搬运。
+ *
+ * **位置**：Krea 官方推荐的描述顺序是 主体 → 外貌 → 服装 → 道具 → 构图 → 环境 → 光线，
+ * 外貌紧随主体，所以拼在整段最前面。
+ *
+ * **不翻译**：Krea 2 的文本编码器是 Qwen3-VL，认得中文（见 [ScenePromptFormat.allowsChinese]），
+ * 所以中文档案直接拼进去，一个字的转写损失都没有。
+ */
+object AppearanceAnchor {
+
+    /**
+     * 把外貌拼到提示词最前面。外貌为空时原样返回；已经拼过就不再拼一遍。
+     *
+     * 拼之前先过 [AppearanceAnchorScrubPolicy]：档案里常被粘进画幅/构图/光线/姿态这类
+     * 「这一张怎么拍」的样板，它们会和场景打架（锚点写 standing、场景写 lying on a bed），
+     * 也会绕过出图清洗把光线词带进最终提示词。剥掉样板之后仍然是**原文**拼接，不作改写。
+     */
+    fun prepend(scene: String, appearance: String): String {
+        val text = scene.trim()
+        val anchor = AppearanceAnchorScrubPolicy.scrub(appearance).text
+        if (anchor.isEmpty()) return text
+        if (text.isEmpty()) return anchor
+        if (text.startsWith(anchor)) return text
+        // 换行分隔：Krea 按模块分段、段间换行，让档案成为独立的一段，而不是上一句的续写。
+        return anchor + "\n" + text
+    }
+
+    /**
+     * 按**形态**把外貌接进最终提示词——出图链路的统一入口。
+     *
+     * - 认中文的形态（Krea 2 / z-image / Qwen 系）：[prepend] 原文换行拼最前，零转写损失；
+     * - 英文 tag 形态（WAI / Illustrious / SDXL）：单行化后用逗号拼在最前——CLIP 只认英文关键词，
+     *   换行会被当成两个无关的句子（而且用户填中文时卡片上已有 `anchorWarning` 提醒）。
+     *
+     * **为什么必须由代码拼**：给 Scene 模型的那份规则里写着「No identity restatement」
+     * （不许复述长相），模型因此**不会**把长相写进提示词。这个函数以前只在已经停用的细化轮里被调用，
+     * 结果「外貌设定词整段丢失」——所以现在它是每条出图路径都必须走的一道硬保证。
+     */
+    /**
+     * 把外貌拼到提示词**最后**（与 [prepend] 相反）。
+     *
+     * 为什么需要它（用户判断，且与实测吻合）：`cfg=1` 时提示词**没有引导强度**，
+     * token 的位置先后几乎就是权重。锚点拼在最前面时占了整段约 45%，
+     * 而动作/姿势/表情/视线全在后半段——于是图里永远是"安静漂亮的脸"，
+     * 表情和视线压不出来、还老看镜头。把动作段提到最前、锚点挪到最后，
+     * 画面才会听场景的。
+     */
+    fun append(scene: String, appearance: String): String {
+        val text = scene.trim()
+        val anchor = AppearanceAnchorScrubPolicy.scrub(appearance).text
+        if (anchor.isEmpty()) return text
+        if (text.isEmpty()) return anchor
+        if (text.endsWith(anchor)) return text
+        return text + "\n" + anchor
+    }
+    fun attach(prompt: String, identity: String, format: ScenePromptFormat): String {
+        val body = prompt.trim()
+        val anchor = AppearanceAnchorScrubPolicy.scrub(identity).text
+        if (anchor.isEmpty()) return body
+        return if (format.allowsChinese) {
+            prepend(body, anchor)
+        } else {
+            ImageGenerationPromptPolicy.forRenderer(anchor, body, format)
+        }
+    }
+
+    /**
+     * 把已经拼在提示词里的外貌锚点**剥掉**，只留模型写出来的画面段。
+     *
+     * 校验/清洗这类针对"模型输出"的规则要用它：外貌是用户亲手写的，不该被那些启发式规则（
+     * 自言自语特征、长度上限、中文比例）判不合格。剥不掉时原样返回。
+     */
+    fun strip(prompt: String, identity: String): String {
+        val text = prompt.trim()
+        // 也要先清洗：拼进去的那一份是清洗过的，拿未清洗的档案来比会匹配不上、剥不掉。
+        val anchor = AppearanceAnchorScrubPolicy.scrub(identity).text
+        if (anchor.isEmpty()) return text
+        // 中文形态：`原文\n画面`；英文 tag 形态：`原文, 画面`（两处都可能被单行化过）。
+        val singleAnchor = ImageGenerationPromptPolicy.singleLine(anchor, ScenePromptFormat.ENGLISH_TAGS)
+        return when {
+            text.startsWith(anchor) -> text.removePrefix(anchor).trimStart('\n', ',', '，', ' ')
+            text.startsWith(singleAnchor) -> text.removePrefix(singleAnchor).trimStart('\n', ',', '，', ' ')
+            text.endsWith(anchor) -> text.removeSuffix(anchor).trimEnd('\n', ',', '，', ' ')
+            text.endsWith(singleAnchor) -> text.removeSuffix(singleAnchor).trimEnd('\n', ',', '，', ' ')
+            else -> text
+        }
+    }
+}
