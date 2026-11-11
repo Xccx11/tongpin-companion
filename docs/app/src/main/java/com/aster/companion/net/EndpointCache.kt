@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicReference
  * - 探测三字段必须**一起**更新，否则并发下会出现"url 是新的、ok 是旧的"撕裂；
  * - baseUrl 快照的 `snapshot + (id to url)` 是读-改-写，必须原子，否则丢更新。
  */
-internal class EndpointCache {
+class EndpointCache {
 
     data class ProbeState(val url: String?, val ok: Boolean, val at: Long)
 
