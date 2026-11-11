@@ -59,4 +59,18 @@ class RequestTraceTest {
         assertEquals(0L, s.averageMs)
         assertEquals(0L, s.p95Ms)
     }
+    @Test
+    fun `report is human readable and mentions the slowest path`() {
+        RequestTrace.record("/v1/chat/completions", 200, true)
+        RequestTrace.record("/v1/images/generations", 2400, true)
+        val text = RequestTrace.report()
+        assertTrue(text.contains("请求 2 次"))
+        assertTrue(text.contains("平均 1300ms"))
+        assertTrue(text.contains("最慢：/v1/images/generations 2400ms"))
+    }
+
+    @Test
+    fun `report on empty trace says so`() {
+        assertEquals("还没有请求记录", RequestTrace.report())
+    }
 }
