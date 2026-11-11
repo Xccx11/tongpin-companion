@@ -27,6 +27,7 @@ class ScenePromptCoordinator @Inject constructor(
     private val dao: CompanionDao,
     private val client: OpenAiCompatibleClient,
     private val transport: SceneTransport,
+    private val appearanceTranscriber: SceneAppearanceTranscriber,
     private val cipher: CompanionSecretCipher,
     private val imageRuleResolver: ImageGenerationRuleResolver,
     private val renderPromptBuilder: CharacterRenderPromptBuilder
@@ -218,7 +219,7 @@ class ScenePromptCoordinator @Inject constructor(
             // 9/13 那版出图提示词里固定带着 `a young East Asian woman, slim narrow eyes,
             // soft flat facial features, a small nose` 这种东亚特征锚点，就是这一步产出的；
             // 后来改成「原文一字不改拼上去」，现在按用户要求回到转写这一路。
-            appearanceAnchor = transcribeAppearance(profile, apiKey, character.appearancePrompt, useBackgroundGate),
+            appearanceAnchor = appearanceTranscriber.transcribeAppearance(profile, apiKey, character.appearancePrompt, useBackgroundGate),
             // 连拍一致性：上一次真正送去出图的最终提示词，让这张的穿着/所在场景/光线与上一张接得上。
             lastScene = dao.worldStates(characterId, "LAST_SCENE")
                 .maxByOrNull { it.updatedAt }
@@ -339,31 +340,6 @@ class ScenePromptCoordinator @Inject constructor(
      *
      * 转写失败（超时／空回复）时**退回原文**：绝不因为多出来的这一步把长相弄丢。
      */
-    private suspend fun transcribeAppearance(
-        profile: ModelProfileEntity,
-        apiKey: String,
-        appearance: String,
-        useBackgroundGate: Boolean
-    ): String {
-        val anchor = appearance.trim()
-        if (anchor.isEmpty()) return anchor
-        val rule = runCatching { imageRuleResolver.resolveAppearanceTranscribeRule() }
-            .getOrElse { renderPromptBuilder.identityFor(anchor) }
-        val reply = transport.chatOnce(
-            profile,
-            apiKey,
-            rule,
-            "【她的外貌设定（用户亲手写的，逐项对照，一项都不能省）】\n$anchor",
-            useBackgroundGate
-        )
-        val translated = reply?.let { ComfyTagPromptPolicy.stripFences(it).trim() }.orEmpty()
-        if (translated.isBlank()) {
-            Log.w(TAG, "appearance transcribe failed, falling back to the raw setting")
-            return anchor
-        }
-        Log.i(TAG, "appearance transcribed: ${translated.take(120)}")
-        return translated
-    }
 
 
     /**
