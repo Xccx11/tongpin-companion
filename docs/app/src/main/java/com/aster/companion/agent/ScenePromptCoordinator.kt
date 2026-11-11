@@ -25,6 +25,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 @Singleton
 class ScenePromptCoordinator @Inject constructor(
     private val dao: CompanionDao,
+    private val inputsReader: SceneInputsReader,
     private val situationReader: SceneSituationReader,
     private val client: OpenAiCompatibleClient,
     private val transport: SceneTransport,
@@ -67,14 +68,6 @@ class ScenePromptCoordinator @Inject constructor(
      * 操作入口调一次：角色行 + 对话模型 profile + 提示词形态各取一次。
      * 角色取不到时返回 null（等价于原来的「Character unavailable」）。
      */
-    suspend fun inputsFor(characterId: String): ScenePromptInputs? {
-        val character = dao.character(characterId) ?: return null
-        return ScenePromptInputs(
-            character = character,
-            conversationProfile = ImagePromptModel.resolve(dao),
-            format = imageRuleResolver.format()
-        )
-    }
 
 
     /** 从私聊线程取最近上下文，按 [LiteProductConfig.SCENE_RECENT_MESSAGES] 轮压缩成简报。 */
@@ -110,7 +103,7 @@ class ScenePromptCoordinator @Inject constructor(
         // （value class）的签名，实测在装箱/拆箱边界上会出现"类型上非空、运行时是 null"。
         // 这里再夹一道**运行时**检查：`as?` 遇到真 null 就返回 null —— 这次拍摄直接放弃，
         // 而不是 NPE 闪退。
-        val resolved = (inputs ?: inputsFor(characterId)) as? ScenePromptInputs ?: return null
+        val resolved = (inputs ?: inputsReader.inputsFor(characterId)) as? ScenePromptInputs ?: return null
         val character = resolved.character
         val profile = resolved.conversationProfile ?: return null
         if (!profile.enabled || profile.encryptedApiKey.isNullOrBlank()) return null
@@ -181,7 +174,7 @@ class ScenePromptCoordinator @Inject constructor(
         inputs: ScenePromptInputs?
     ): Draft {
         // 同 `decideShot`：运行时兜底，见那里的说明。
-        val resolved = (inputs ?: inputsFor(characterId)) as? ScenePromptInputs
+        val resolved = (inputs ?: inputsReader.inputsFor(characterId)) as? ScenePromptInputs
             ?: error("Character unavailable")
         val character = resolved.character
         val profile = requireNotNull(resolved.conversationProfile) {
