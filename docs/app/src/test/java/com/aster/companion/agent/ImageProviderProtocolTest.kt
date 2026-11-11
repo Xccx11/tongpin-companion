@@ -27,9 +27,9 @@ class ImageProviderProtocolTest {
     }
 
     @Test
-    fun `task gateway requires an explicit protocol`() {
+    fun `all profiles resolve to OpenAI Images`() {
         assertEquals(
-            ImageProviderProtocol.COMFY_GATEWAY_TASK,
+            ImageProviderProtocol.OPENAI_IMAGES,
             ImageProviderProtocolResolver.resolve(profile("wai-nsfw-illustrious", ImageProviderProtocol.COMFY_GATEWAY_TASK.name))
         )
         assertEquals(

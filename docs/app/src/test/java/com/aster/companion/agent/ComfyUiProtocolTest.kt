@@ -19,17 +19,17 @@ class ComfyUiProtocolTest {
     )
 
     @Test
-    fun `recognizes the built in ComfyUI Qwen workflow`() {
-        assertTrue(ComfyUiProtocol.supports(profile))
+    fun `ComfyUI direct protocol is no longer selected, but endpoints still resolve`() {
+        assertFalse(ComfyUiProtocol.supports(profile))
         assertEquals("http://10.0.2.2:8188/prompt", ComfyUiProtocol.promptEndpoint(profile))
         assertEquals(ComfyUiWorkflow.QWEN_IMAGE_EDIT, ComfyUiProtocol.workflow(profile))
     }
 
     @Test
-    fun `selects the Illustrious reference workflow only for the Illustrious profile`() {
+    fun `Illustrious workflow still resolvable, but not auto-selected`() {
         val illustrious = profile.copy(modelName = ComfyUiProtocol.ILLUSTRIOUS_XL_MODEL_NAME)
 
-        assertTrue(ComfyUiProtocol.supports(illustrious))
+        assertFalse(ComfyUiProtocol.supports(illustrious))
         assertEquals(ComfyUiWorkflow.ILLUSTRIOUS_XL_REFERENCE, ComfyUiProtocol.workflow(illustrious))
     }
 

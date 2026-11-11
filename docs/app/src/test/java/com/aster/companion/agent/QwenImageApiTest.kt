@@ -20,8 +20,8 @@ class QwenImageApiTest {
     )
 
     @Test
-    fun `routes Qwen image models to the workspace native generation endpoint`() {
-        assertTrue(QwenImageApi.supports(qwenProfile))
+    fun `Qwen native endpoint not auto-selected, but URL still resolves`() {
+        assertFalse(QwenImageApi.supports(qwenProfile))
         assertEquals(
             "https://ws-example.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
             QwenImageApi.generationEndpoint(qwenProfile)

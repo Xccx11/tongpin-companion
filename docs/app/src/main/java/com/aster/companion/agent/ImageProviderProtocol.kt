@@ -12,22 +12,17 @@ enum class ImageProviderProtocol {
 
 /** Resolves an explicit provider protocol, with AUTO retained only for old saved profiles. */
 object ImageProviderProtocolResolver {
-    fun resolve(profile: ModelProfileEntity): ImageProviderProtocol {
-        val explicit = profile.imageProtocol.trim().uppercase()
-            .let { value -> runCatching { ImageProviderProtocol.valueOf(value) }.getOrNull() }
-            ?.takeUnless { it == ImageProviderProtocol.AUTO }
-        if (explicit != null) return explicit
-
-        // Compatibility for profiles written before protocol was persisted. New documented
-        // gateway model names remain standard OpenAI Images unless a protocol is explicit.
-        val model = profile.modelName.trim().lowercase()
-        return when {
-            model == "wai-illustrious-v1" -> ImageProviderProtocol.COMFY_GATEWAY_TASK
-            model in setOf(ComfyUiProtocol.QWEN_IMAGE_EDIT_MODEL_NAME, ComfyUiProtocol.ILLUSTRIOUS_XL_MODEL_NAME) -> ImageProviderProtocol.COMFY_UI
-            model.startsWith("qwen-image") && profile.baseUrl.lowercase().let { it.contains("dashscope.aliyuncs.com") || it.contains(".maas.aliyuncs.com") } -> ImageProviderProtocol.QWEN_DASHSCOPE
-            else -> ImageProviderProtocol.OPENAI_IMAGES
-        }
-    }
+    /**
+     * **出图只有一条通道**：OpenAI Images 兼容接口（2026-11-11 简化）。
+     *
+     * 本地网关和各家 API 都是 `POST {baseUrl}/v1/images/generations`，所以不需要再按模型名
+     * 猜协议（原来会在 COMFY_GATEWAY_TASK / COMFY_UI / QWEN_DASHSCOPE 之间切）。
+     *
+     * 枚举值保留：`ComfyUiProtocol` / `ComfyGatewayTaskProtocol` / `QwenImageApi` 仍引用它们，
+     * 只是那些分支永远不会被选中（`profile.imageProtocol` 字段也因此忽略，零迁移）。
+     */
+    fun resolve(@Suppress("UNUSED_PARAMETER") profile: ModelProfileEntity): ImageProviderProtocol =
+        ImageProviderProtocol.OPENAI_IMAGES
 }
 
 /** 所有 Provider 都接收「外貌原样 + 当刻场景」，保证人物一致。 */

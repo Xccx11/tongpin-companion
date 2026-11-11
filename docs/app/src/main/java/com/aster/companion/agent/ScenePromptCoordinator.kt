@@ -393,112 +393,11 @@ class ScenePromptCoordinator @Inject constructor(
         return translated
     }
 
-    private suspend fun extractOutfit(
-        profile: ModelProfileEntity,
-        apiKey: String,
-        character: CharacterEntity,
-        recent: List<String>,
-        draft: String,
-        useBackgroundGate: Boolean
-    ): String {
-        val system = imageRuleResolver.resolveOutfitExtractRule()
-        val user = buildString {
-            appendLine("【你们最近的对话】")
-            recent.forEach { appendLine(it.trim()) }
-            appendLine()
-            appendLine("【已经写好的画面描述】")
-            appendLine(draft.trim())
-            if (character.personalityPrompt.isNotBlank()) {
-                appendLine()
-                appendLine("【她的固定人设】")
-                appendLine(character.personalityPrompt.trim().take(800))
-            }
-        }
-        return chatOnce(profile, apiKey, system, user, useBackgroundGate)?.trim().orEmpty()
-    }
 
     /**
      * 递进细化：在第 1 轮已合格的 [base] 上再跑 [LiteProductConfig.SCENE_REFINE_PASSES] 轮，一轮比一轮细。
      * 任一轮无回复、返回空或校验不过，就沿用上一轮的结果并**立刻停掉后续轮次**（不重试、不兜底）。
      */
-    private suspend fun refine(
-        profile: ModelProfileEntity,
-        apiKey: String,
-        character: CharacterEntity,
-        base: Draft,
-        format: ScenePromptFormat,
-        stripCjk: Boolean,
-        keepLineBreaks: Boolean,
-        useBackgroundGate: Boolean
-    ): Draft {
-        var current = base
-        for (pass in 2..(1 + LiteProductConfig.SCENE_REFINE_PASSES)) {
-            val request = ScenePromptRefiner.prompt(
-                previous = current.prompt,
-                format = format,
-                pass = pass,
-                rule = imageRuleResolver.resolveSceneRefineRule(pass, format),
-                appearance = character.appearancePrompt.orEmpty()
-            )
-            val raw = chatOnce(profile, apiKey, request.system, request.user, useBackgroundGate)
-            val refined = raw?.let { reply ->
-                SceneFraming.ensure(
-                    SceneDeviceSuppression.strip(
-                        ComfyTagPromptPolicy.sanitizeScene(
-                            prompt = ComfyTagPromptPolicy.stripFences(reply),
-                            stripCjk = stripCjk,
-                            keepLineBreaks = keepLineBreaks
-                        ),
-                        format
-                    ),
-                    current.shotType ?: CharacterPhotoShotPolicy.PhotoShotType.EYES_ON_HER,
-                    format
-                )
-            }
-            val validation = refined?.let {
-                ComfyTagPromptPolicy.validate(it, character.appearancePrompt, character.name, ScenePromptRefiner.MAX_CHARS)
-            }
-            val validationReasons = validation?.reasons?.joinToString(",")
-            if (validation != null && !validation.accepted) {
-                Log.w(TAG, "round validation not accepted, using anyway: $validationReasons")
-            }
-            if (refined == null || refined.isBlank()) {
-                val reason = when {
-                    raw == null -> "empty_reply"
-                    else -> "empty_result"
-                }
-                Log.w(
-                    TAG,
-                    "refine pass=$pass failed reason=$reason " +
-                        "kept_pass=${current.refinedPasses + 1} kept_len=${current.prompt.length}"
-                )
-                return current.copy(notes = current.notes + "第 $pass 轮细化失败，已沿用上一轮")
-            }
-            current = current.copy(prompt = refined, refinedPasses = pass - 1)
-        }
-        Log.i(TAG, "refine done passes=${current.refinedPasses} len=${current.prompt.length}")
-        // 出图前的最后一道校验：拿成品对「第 1 轮的原始草稿」逐条核对，把错的地方改对。
-        // 实测模型会违背草稿里明写的东西——说全脱却给穿上衣服、要全身却写成 close-up、
-        // 草稿里的第二个人整个消失。规则写得再细它也会漏，所以再问一次。
-        current = verify(current, base, profile, apiKey, character, format, stripCjk, keepLineBreaks, useBackgroundGate)
-        // 最后两步都是**代码硬保证**，不再依赖模型：
-        // ① 景别缺失就补全身（模型看不到景别会自己裁成半身）；
-        // ② 外貌原文拼在最前面（转述必然丢细节：实测 22 岁→28 岁、妆容整段消失、身材全丢。
-        //    Krea 2 的编码器是 Qwen3-VL，认得中文，所以中文档案直接拼，零转写损失）。
-        current = current.copy(
-            prompt = AppearanceAnchor.append(
-                SceneFraming.ensure(
-                    current.prompt,
-                    current.shotType ?: CharacterPhotoShotPolicy.PhotoShotType.EYES_ON_HER,
-                    format
-                ),
-                character.appearancePrompt.orEmpty()
-            ),
-            notes = current.notes + "外貌原文已原样拼在提示词开头"
-        )
-        Log.i(TAG, "scene final len=${current.prompt.length}")
-        return current
-    }
 
     /**
      * 出图前的校验轮：拿成品提示词对第 1 轮的原始草稿逐条核对并修正。
@@ -506,44 +405,6 @@ class ScenePromptCoordinator @Inject constructor(
      * 校验轮自己失败（超时／空回复）时**沿用原稿**——绝不因为多出来的这一轮把已经写好的
      * 提示词弄丢（历史上按"校验不过就丢弃"处理过，上层表现为「照片没拍成」）。
      */
-    private suspend fun verify(
-        draft: Draft,
-        base: Draft,
-        profile: ModelProfileEntity,
-        apiKey: String,
-        character: CharacterEntity,
-        format: ScenePromptFormat,
-        stripCjk: Boolean,
-        keepLineBreaks: Boolean,
-        useBackgroundGate: Boolean
-    ): Draft {
-        val rule = runCatching { imageRuleResolver.resolveSceneVerifyRule(format) }
-            .getOrElse { SceneVerifier.defaultRule(format) }
-        val request = SceneVerifier.prompt(
-            rule = rule,
-            draft = base.prompt,
-            appearance = character.appearancePrompt.orEmpty(),
-            candidate = draft.prompt,
-            format = format
-        )
-        val raw = chatOnce(profile, apiKey, request.system, request.user, useBackgroundGate)
-        val fixed = raw?.let {
-            SceneDeviceSuppression.strip(
-                ComfyTagPromptPolicy.sanitizeScene(
-                    prompt = ComfyTagPromptPolicy.stripFences(it),
-                    stripCjk = stripCjk,
-                    keepLineBreaks = keepLineBreaks
-                ),
-                format
-            )
-        }
-        if (fixed.isNullOrBlank()) {
-            Log.w(TAG, "verify pass failed, keeping the refined prompt")
-            return draft.copy(notes = draft.notes + "校验轮没跑成，已沿用细化稿")
-        }
-        Log.i(TAG, "verify done len=${draft.prompt.length} -> ${fixed.length}")
-        return draft.copy(prompt = fixed, notes = draft.notes + "已过出图前校验")
-    }
 
     private suspend fun chatOnce(
         profile: ModelProfileEntity,
