@@ -31,7 +31,10 @@ android {
 
     signingConfigs {
         create("localDebug") {
-            storeFile = File("D:\\.android\\debug.keystore")
+            // 跨平台：用用户目录下的标准 debug keystore；不存在则不设置 storeFile，
+            // 交给 AGP 使用默认 debug 签名（Linux/macOS 的 CI 也能正常构建）。
+            val localKs = File(System.getProperty("user.home"), ".android/debug.keystore")
+            if (localKs.exists()) storeFile = localKs
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
