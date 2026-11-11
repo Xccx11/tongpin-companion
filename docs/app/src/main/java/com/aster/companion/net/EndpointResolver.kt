@@ -60,10 +60,7 @@ object EndpointResolver {
     /** 探测结果缓存时长：30 秒内不重复探测。 */
     private const val PROBE_TTL_MS = 30_000L
 
-    // A5：探测结果三字段收进一个不可变状态，一次 CAS 同时更新 —— 原来分三次写，
-    // 并发下可能出现"url 是新一轮探测的、ok/at 还是上一轮的"这种撕裂。
-    private data class ProbeState(val url: String?, val ok: Boolean, val at: Long)
-    private val probe = java.util.concurrent.atomic.AtomicReference(ProbeState(null, false, 0L))
+
 
     // ---------------------------------------------------------------- 读
 
@@ -119,7 +116,7 @@ object EndpointResolver {
      */
     suspend fun resolve(dao: CompanionDao, profile: ModelProfileEntity): ModelProfileEntity {
         val url = baseUrl(dao, profile)
-        snapshot.updateAndGet { it + (profile.id to url) }   // 原子刷新快照，给非 suspend 的拼装用
+        cache.putBaseUrl(profile.id, url)   // 原子刷新快照，给非 suspend 的拼装用
         return if (url == profile.baseUrl) profile else profile.copy(baseUrl = url)
     }
 
@@ -131,9 +128,8 @@ object EndpointResolver {
      * （拉规则、图片提示词模型…），所以这里基本总是新鲜的；
      * 拿不到就回退 profile 自己的 baseUrl —— 行为和不接解析器时完全一样。
      */
-    // A5：快照从 @Volatile var 改成 AtomicReference —— 原来的 `snapshot = snapshot + (...)` 是
-    // "读-改-写"，并发下会丢更新；updateAndGet 是原子的。
-    private val snapshot = java.util.concurrent.atomic.AtomicReference<Map<String, String>>(emptyMap())
+    // A5：缓存收进 EndpointCache（内部已是原子不可变状态）；下一步把它变成注入的构造参数即可去全局。
+    private val cache = EndpointCache()
 
     /**
      * 清空所有进程级缓存（探测结果 + baseUrl 快照）。
@@ -143,12 +139,12 @@ object EndpointResolver {
      */
     @androidx.annotation.VisibleForTesting
     internal fun clearCaches() {
-        probe.set(ProbeState(null, false, 0L))
-        snapshot.set(emptyMap())
+        cache.clearProbe()
+        cache.clearBaseUrls()
     }
 
     fun cachedBaseUrl(profileId: String, fallback: String): String =
-        snapshot.get()[profileId]?.takeIf { it.isNotBlank() } ?: fallback
+        cache.baseUrlOf(profileId)?.takeIf { it.isNotBlank() } ?: fallback
 
     /** 给界面显示用：当前实际生效的是内网还是外网。 */
     suspend fun describe(dao: CompanionDao): String {
@@ -181,7 +177,7 @@ object EndpointResolver {
     /** 只做一次 TCP 连接：够判断"家里那台机器在不在"，又不会拖慢请求。 */
     private suspend fun reachable(url: String): Boolean {
         val now = System.currentTimeMillis()
-        val cached = probe.get()
+        val cached = cache.probeState()
         if (cached.url == url && now - cached.at < PROBE_TTL_MS) return cached.ok
 
         val ok = withContext(Dispatchers.IO) {
@@ -195,7 +191,7 @@ object EndpointResolver {
                 true
             }.getOrDefault(false)
         }
-        probe.set(ProbeState(url, ok, now))
+        cache.setProbe(url, ok, now)
         return ok
     }
 
@@ -204,6 +200,6 @@ object EndpointResolver {
 
     /** 测试用：清掉探测缓存。 */
     internal fun resetProbeCache() {
-        probe.set(ProbeState(null, false, 0L))
+        cache.clearProbe()
     }
 }
