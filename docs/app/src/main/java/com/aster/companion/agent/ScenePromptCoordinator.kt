@@ -391,11 +391,7 @@ class ScenePromptCoordinator @Inject constructor(
         appearancePrompt: String,
         characterName: String = ""
     ): ComfyTagPromptPolicy.Validation =
-        ComfyTagPromptPolicy.validate(
-            AppearanceAnchor.strip(prompt, appearancePrompt),
-            appearancePrompt,
-            characterName
-        )
+        ScenePromptValidation.validate(prompt, appearancePrompt, characterName)
 
     private companion object {
         const val TAG = "ScenePrompt"
