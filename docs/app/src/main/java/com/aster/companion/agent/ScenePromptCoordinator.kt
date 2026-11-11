@@ -25,6 +25,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 @Singleton
 class ScenePromptCoordinator @Inject constructor(
     private val dao: CompanionDao,
+    private val situationReader: SceneSituationReader,
     private val client: OpenAiCompatibleClient,
     private val transport: SceneTransport,
     private val appearanceTranscriber: SceneAppearanceTranscriber,
@@ -118,7 +119,7 @@ class ScenePromptCoordinator @Inject constructor(
             characterName = character.name,
             personalityPrompt = character.personalityPrompt,
             relationshipPrompt = character.relationshipPrompt,
-            currentSituation = situationOf(characterId),
+            currentSituation = situationReader.situationOf(characterId),
             timeOfDay = timeOfDay(),
             recent = recentBrief(threadId),
             herOwnWords = herOwnWords
@@ -140,21 +141,6 @@ class ScenePromptCoordinator @Inject constructor(
      * 还是在宿舍——出的图就会出现「人是对的、场景是编的」。这正是「照片不像她的生活」的根源：
      * 她明明在图书馆，图里却是一间谁也认不出的房间。
      */
-    private suspend fun situationOf(characterId: String): String {
-        val living = dao.livingState(characterId)
-        val place = living?.locationId?.takeIf { it.isNotBlank() }
-            ?.let { dao.worldLocation(it)?.displayName ?: it }
-        val detail = listOfNotNull(
-            living?.currentActivity?.takeIf { it.isNotBlank() },
-            place?.let { "在$it" },
-            living?.mood?.takeIf { it.isNotBlank() }?.let { "心情 $it" }
-        ).joinToString(" · ")
-        // 这段是**背景**，不是这次的拍摄指令。原先拼成"她此刻正在：XXX"，
-        // 生活引擎排的活动看起来最像重点，于是压过了对话内容——
-        // 她那边走生活时间线，和你们聊的内容没关系，照它出图就出戏。
-        if (detail.isBlank()) return ""
-        return "她的生活背景（仅供参考，不要照搬；和你们正在聊的内容对不上时，以聊天内容为准）：$detail"
-    }
 
     /**
      * 时段 + **具体时刻**。
@@ -226,7 +212,7 @@ class ScenePromptCoordinator @Inject constructor(
                 ?.content.orEmpty(),
             recentMessages = recent,
             intent = intent,
-            currentSituation = situationOf(characterId),
+            currentSituation = situationReader.situationOf(characterId),
             viewpoint = viewpoint,
             decidedShot = shot?.shot,
             decidedWhy = shot?.why,
