@@ -44,3 +44,8 @@ device-recovery/
 
 # ---- 大体积素材（按需再单独加回来）----
 screenshots/*.mp4
+
+# ---- 本地备份文件（绝不入库）----
+*.bak
+*.bak-*
+*.orig
