@@ -29,6 +29,7 @@ class ScenePromptCoordinator @Inject constructor(
     private val situationReader: SceneSituationReader,
     private val client: OpenAiCompatibleClient,
     private val transport: SceneTransport,
+    private val decider: SceneDecider,
     private val appearanceTranscriber: SceneAppearanceTranscriber,
     private val cipher: CompanionSecretCipher,
     private val imageRuleResolver: ImageGenerationRuleResolver,
@@ -71,18 +72,6 @@ class ScenePromptCoordinator @Inject constructor(
 
 
     /** 从私聊线程取最近上下文，按 [LiteProductConfig.SCENE_RECENT_MESSAGES] 轮压缩成简报。 */
-    suspend fun recentBrief(threadId: String): List<String> = dao.recentMessages(threadId, LiteProductConfig.SCENE_RECENT_MESSAGES)
-        .asReversed()
-        .mapNotNull { message ->
-            val body = message.body.trim().replace(WHITESPACE, " ")
-            if (body.isEmpty() || message.id.startsWith("stream:")) return@mapNotNull null
-            if (message.fromUser) {
-                "User: ${body.take(LiteProductConfig.SCENE_BRIEF_CHARS)}"
-            } else {
-                val speaker = dao.character(message.characterId.orEmpty())?.name?.trim().orEmpty().ifBlank { "Character" }
-                "$speaker: ${body.take(LiteProductConfig.SCENE_BRIEF_CHARS)}"
-            }
-        }
 
     /**
      * 第一步：她自己决定这次拍什么。
@@ -91,41 +80,6 @@ class ScenePromptCoordinator @Inject constructor(
      * 返回 null 表示这次没想清楚，调用方回退到单步流程。
      * [inputs] 由操作入口取好传进来时就不再回查数据库。
      */
-    suspend fun decideShot(
-        threadId: String,
-        characterId: String,
-        herOwnWords: String = "",
-        useBackgroundGate: Boolean = false,
-        inputs: ScenePromptInputs?
-    ): CharacterPhotoShotPolicy.PhotoShot? {
-        // ⚠️ 真机上 `resolved` 曾**以 null 到达下一行**（崩溃栈点名 `ScenePromptInputs.character`
-        // 在 null 上被读）。源码的 `?:` 链在语义上兜住了，但这条链是 suspend + 返回 `Result`
-        // （value class）的签名，实测在装箱/拆箱边界上会出现"类型上非空、运行时是 null"。
-        // 这里再夹一道**运行时**检查：`as?` 遇到真 null 就返回 null —— 这次拍摄直接放弃，
-        // 而不是 NPE 闪退。
-        val resolved = (inputs ?: inputsReader.inputsFor(characterId)) as? ScenePromptInputs ?: return null
-        val character = resolved.character
-        val profile = resolved.conversationProfile ?: return null
-        if (!profile.enabled || profile.encryptedApiKey.isNullOrBlank()) return null
-        val apiKey = cipher.decrypt(requireNotNull(profile.encryptedApiKey))
-        val input = CharacterPhotoShotPolicy.Input(
-            characterName = character.name,
-            personalityPrompt = character.personalityPrompt,
-            relationshipPrompt = character.relationshipPrompt,
-            currentSituation = situationReader.situationOf(characterId),
-            timeOfDay = timeOfDay(),
-            recent = recentBrief(threadId),
-            herOwnWords = herOwnWords
-        )
-        val raw = transport.chatOnce(
-            profile = profile,
-            apiKey = apiKey,
-            system = CharacterPhotoShotPolicy.system(input),
-            user = CharacterPhotoShotPolicy.user(),
-            useBackgroundGate = useBackgroundGate
-        ) ?: return null
-        return CharacterPhotoShotPolicy.parse(raw)
-    }
 
     /**
      * 她此刻的处境：**在做什么 · 在哪 · 什么心情 · 身上什么状态**。
@@ -159,7 +113,7 @@ class ScenePromptCoordinator @Inject constructor(
         shot: CharacterPhotoShotPolicy.PhotoShot? = null,
         inputs: ScenePromptInputs?
     ): Result<Draft> = runCatching {
-        buildTagPrompt(characterId, intent, recentBrief(threadId), useBackgroundGate, viewpoint, wantReason, shot, inputs)
+        buildTagPrompt(characterId, intent, decider.recentBrief(threadId), useBackgroundGate, viewpoint, wantReason, shot, inputs)
     }
 
     /** 纯逻辑入口：给定简报直接产出 tag 串，便于单测与朋友圈复用。 */
@@ -341,6 +295,18 @@ class ScenePromptCoordinator @Inject constructor(
      * **模型写出来的画面段**；外貌是用户亲手写的，规则不适用——用户写「the user's girlfriend」
      * 不该因为命中 `the user` 就整张图出不来。
      */
+
+
+    /** 委托给 [SceneDecider]（外部调用点保持不变）。 */
+    suspend fun decideShot(
+        threadId: String,
+        characterId: String,
+        herOwnWords: String = "",
+        useBackgroundGate: Boolean = false,
+        inputs: ScenePromptInputs?
+    ): CharacterPhotoShotPolicy.PhotoShot? =
+        decider.decideShot(threadId, characterId, herOwnWords, useBackgroundGate, inputs)
+
     fun validateEditedPrompt(
         prompt: String,
         appearancePrompt: String,
