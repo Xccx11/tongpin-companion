@@ -677,11 +677,22 @@ class CompanionHomeViewModel @Inject constructor(
         // 当前 handler 是占位（只记录、返回 false = 保留待重放），等照片重放管线接入后替换。
         runCatching {
             com.aster.companion.diag.PendingActionQueue.drain { action ->
-                android.util.Log.i(
-                    "TongpinOffline",
-                    "pending replay pending: kind=" + action.kind + " key=" + action.key
+                if (action.kind != "scene_photo") return@drain false
+                val parts = action.payload.split("\n", limit = 2)
+                if (parts.size < 2) return@drain true   // 旧格式（只有 intent）→ 丢弃，避免死循环重试
+                val characterId = parts[0]
+                val intent = parts[1]
+                val threadId = action.key.removePrefix("scene:").substringBeforeLast(":")
+                liteScenePhotoBus.publish(
+                    com.aster.companion.lite.ScenePhotoRequest(
+                        threadId = threadId,
+                        characterId = characterId,
+                        intent = intent,
+                        stage = com.aster.companion.lite.ScenePhotoStage.READY,
+                    )
                 )
-                false
+                android.util.Log.i("TongpinOffline", "replayed scene photo: thread=" + threadId)
+                true
             }
         }
         val synced = com.aster.companion.lite.LiteBackgroundLlmGate.withPermit {
