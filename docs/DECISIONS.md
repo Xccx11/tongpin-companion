@@ -32,12 +32,12 @@
 
 | 方法 | 真实依赖 | 能否单独搬 |
 |---|---|---|
-| `decideShot` | `inputsFor` + `character` + `conversationProfile` + `cipher` + `dao` | ✗ 必须连 `inputsFor` 一起 |
-| `inputsFor` | `dao` + `character` + `conversationProfile` + `cipher` | 可（和 decideShot 同簇） |
-| `buildTagPrompt` | `dao` + `transport` + `renderPromptBuilder` + `imageRuleResolver` + `cipher` + `transcribeAppearance` | ✗ 依赖最多 |
-| `buildTagPromptForThread` | 同上（转调 buildTagPrompt） | 随 buildTagPrompt |
-| `transcribeAppearance` | `transport` + `imageRuleResolver` | 可（较干净） |
-| `validateEditedPrompt` | 无（纯函数） | ✓ 最容易 |
+| `decideShot`（行 99-133） | `transport` `cipher` `inputsFor` `character` `conversationProfile` `situationOf` | ✗ 必须连 `inputsFor`/`situationOf` 一起 |
+| `inputsFor`（行 68-75） | `dao` `imageRuleResolver` `character` `conversationProfile` | 可（与 decideShot 同簇） |
+| `buildTagPrompt`（行 186-323） | `dao` `transport` `cipher` `imageRuleResolver` `inputsFor` `character` `conversationProfile` `situationOf` `LiteProductConfig` | ✗ 依赖最多（9 个） |
+| `buildTagPromptForThread`（行 172-183） | 仅转调 `buildTagPrompt` | 随 buildTagPrompt |
+| `transcribeAppearance`（行 342-366） | `transport` `imageRuleResolver` `renderPromptBuilder` | 可（较干净） |
+| `validateEditedPrompt`（行 389-403） | **无**（纯函数） | ✓ **最容易，可先做** |
 
 **结论**：`ScenePromptCoordinator` 的拆分应该按"簇"来，而不是按方法：
 
