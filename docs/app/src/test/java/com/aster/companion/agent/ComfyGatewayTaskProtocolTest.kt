@@ -8,14 +8,12 @@ import org.junit.Test
 
 class ComfyGatewayTaskProtocolTest {
     @Test
-    fun `only the local illustrious gateway opts into background task protocol`() {
+    fun `background task protocol is no longer selected after unifying to OpenAI Images`() {
         val gateway = ModelProfileEntity("image", "image_generation", "https://images.example/v1", "wai-illustrious-v1", true, 120, "key", null)
         val regular = gateway.copy(modelName = "gpt-image-2")
 
-        assertTrue(ComfyGatewayTaskProtocol.supports(gateway))
+        assertFalse(ComfyGatewayTaskProtocol.supports(gateway))
         assertFalse(ComfyGatewayTaskProtocol.supports(regular))
-        assertFalse(ImageEditRoutePolicy.usesReferenceEditEndpoint(gateway))
-        assertTrue(ImageEditRoutePolicy.usesReferenceEditEndpoint(regular))
     }
 
     @Test
