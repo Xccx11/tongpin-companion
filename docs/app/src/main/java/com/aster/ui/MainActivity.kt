@@ -1691,169 +1691,10 @@ private suspend fun saveImageToGallery(context: android.content.Context, source:
     }
 }
 
-@Composable
-@OptIn(ExperimentalLayoutApi::class)
-internal fun MemoryPage(
-    state: com.aster.companion.ui.CompanionHomeState,
-    onDeleteMemory: (String) -> Unit,
-    onToggleMemoryBlocked: (String, Boolean) -> Unit,
-    /** 长按「留在今天的照片」→ 删除。 */
-    onDeleteDiaryPhoto: (String) -> Unit,
-    modifier: Modifier
-) {
-    val colors = AsterTheme.colors
-    // 日记现在有自己的类型：以前它和「共同活动 / 互动 / 世界事件」共用 EVENT，
-    // 所以这一页混着一堆系统流水，真正的日记只占一小部分。现在只认 DIARY。
-    val diaryEntries = state.memories.filter { it.kind == MemoryKind.DIARY }
-    val diaryCharacterIds = (diaryEntries.mapNotNull { it.characterId } + state.diaryPhotos.map { it.characterId }).distinct()
-    var selectedCharacterId by rememberSaveable { mutableStateOf<String?>(null) }
-    val activeCharacterId = selectedCharacterId?.takeIf { it in diaryCharacterIds } ?: diaryCharacterIds.firstOrNull()
-    val entriesForCharacter = diaryEntries.filter { it.characterId == activeCharacterId }
-    val photosForCharacter = state.diaryPhotos.filter { it.characterId == activeCharacterId }
-    val dateKeys = (entriesForCharacter.map { diaryDateKey(it.updatedAt) } + photosForCharacter.map { diaryDateKey(it.createdAt) }).distinct()
-    var selectedDateKey by rememberSaveable(activeCharacterId) { mutableStateOf<String?>(null) }
-    val activeDateKey = selectedDateKey?.takeIf { it in dateKeys } ?: dateKeys.firstOrNull()
-    val visibleEntries = entriesForCharacter.filter { diaryDateKey(it.updatedAt) == activeDateKey }
-    val selectedTimestamp = visibleEntries.maxByOrNull { it.updatedAt }?.updatedAt
-        ?: photosForCharacter.firstOrNull { diaryDateKey(it.createdAt) == activeDateKey }?.createdAt
-    val visiblePhotos = selectedTimestamp?.let { timestamp -> photosForCharacter.filter { photo ->
-        DiaryPhotoPolicy.belongsToDiary(photo.characterId, activeCharacterId, photo.createdAt, timestamp)
-    } }.orEmpty()
-    var previewImageUri by rememberSaveable { mutableStateOf<String?>(null) }
-    // 长按照片 → 先确认再删（照片删了没法恢复，不做成"一按就没"）。
-    var pendingPhotoDeleteUri by rememberSaveable { mutableStateOf<String?>(null) }
-    pendingPhotoDeleteUri?.let { uri ->
-        AlertDialog(
-            onDismissRequest = { pendingPhotoDeleteUri = null },
-            title = { Text("删除这张照片？") },
-            text = { Text("会从「她留下的照片」里删掉，聊天记录里的那条消息不受影响。", color = colors.textMuted, fontSize = AsterType.body) },
-            confirmButton = {
-                TextButton(onClick = { onDeleteDiaryPhoto(uri); pendingPhotoDeleteUri = null }) {
-                    Text("删除", color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = { TextButton(onClick = { pendingPhotoDeleteUri = null }) { Text("取消", color = colors.textMuted) } }
-        )
-    }
-    LazyColumn(modifier.fillMaxSize().background(colors.bg).padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
-        item {
-            Text("日记", color = colors.text, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 18.dp))
-            Text("翻看她在一天结束后写下的话。", color = colors.textMuted, fontSize = AsterType.label, modifier = Modifier.padding(top = 3.dp, bottom = 17.dp))
-            if (state.diaryWritingThreadId != null) {
-                Column(Modifier.fillMaxWidth().background(colors.accentWash, RoundedCornerShape(AsterMetrics.cardRadius)).padding(15.dp)) {
-                    Text("她正在写今天的日记", color = colors.primary, fontSize = AsterType.bodyLarge, fontWeight = FontWeight.SemiBold)
-                    Text("整理好后会留在这里。", color = colors.textMuted, fontSize = AsterType.label, modifier = Modifier.padding(top = 4.dp))
-                }
-            }
-            Text("谁写的", color = colors.textMuted, fontSize = AsterType.label, modifier = Modifier.padding(top = 23.dp, bottom = 8.dp))
-        }
-        if (diaryCharacterIds.isNotEmpty()) {
-            item {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(AsterMetrics.gap)) {
-                    diaryCharacterIds.forEach { characterId ->
-                        val character = state.characters.firstOrNull { it.id == characterId }
-                        DiaryFilterChip(character?.name ?: "未命名角色", activeCharacterId == characterId) {
-                            selectedCharacterId = characterId
-                            selectedDateKey = null
-                        }
-                    }
-                }
-            }
-            item {
-                Text("翻到哪一天", color = colors.textMuted, fontSize = AsterType.label, modifier = Modifier.padding(top = 24.dp, bottom = 8.dp))
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(AsterMetrics.gap)) {
-                    dateKeys.forEach { dateKey ->
-                        val sampleTime = entriesForCharacter.firstOrNull { diaryDateKey(it.updatedAt) == dateKey }?.updatedAt
-                            ?: photosForCharacter.first { diaryDateKey(it.createdAt) == dateKey }.createdAt
-                        DiaryFilterChip(diaryDateLabel(sampleTime), activeDateKey == dateKey) { selectedDateKey = dateKey }
-                    }
-                }
-            }
-            item {
-                val selectedCharacter = state.characters.firstOrNull { it.id == activeCharacterId }
-                val selectedEntry = visibleEntries.maxByOrNull { it.updatedAt }
-                if (selectedEntry != null) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(top = 24.dp).asterCard(colors).padding(horizontal = 22.dp, vertical = 24.dp)
-                    ) {
-                        Text(diaryDateLabel(selectedEntry.updatedAt), color = colors.primary, fontSize = AsterType.body, fontWeight = FontWeight.SemiBold)
-                        Text("${selectedCharacter?.name ?: "她"} 写给今天的你", color = colors.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 7.dp))
-                        Spacer(Modifier.height(22.dp))
-                        Text(selectedEntry.content, color = colors.text, fontSize = 17.sp, lineHeight = 30.sp)
-                        Text("${selectedCharacter?.name ?: "她"}", color = colors.textMuted, fontSize = AsterType.body, modifier = Modifier.fillMaxWidth().padding(top = 30.dp), textAlign = TextAlign.End)
-                    }
-                }
-                if (visiblePhotos.isNotEmpty()) {
-                    Column(Modifier.fillMaxWidth().padding(top = 18.dp)) {
-                        Text("留在今天的照片", color = colors.textMuted, fontSize = AsterType.label, modifier = Modifier.padding(bottom = 8.dp))
-                        visiblePhotos.forEach { photo ->
-                            AsyncImage(
-                                model = photo.imageUri,
-                                contentDescription = "日记照片",
-                                contentScale = ContentScale.Crop,
-                                // 点开看大图；长按 = 删除（先弹确认）。
-                                modifier = Modifier.fillMaxWidth().height(240.dp).clip(RoundedCornerShape(AsterMetrics.cardRadius))
-                                    .combinedClickable(
-                                        onClick = { previewImageUri = photo.imageUri },
-                                        onLongClick = { pendingPhotoDeleteUri = photo.imageUri }
-                                    )
-                            )
-                            Spacer(Modifier.height(10.dp))
-                        }
-                    }
-                }
-            }
-        }
-        if (diaryCharacterIds.isEmpty()) item {
-            Text("她还没有写下日记。", color = colors.textMuted, fontSize = AsterType.body, modifier = Modifier.fillMaxWidth().padding(top = 32.dp), textAlign = TextAlign.Center)
-        }
-        item { Spacer(Modifier.height(18.dp)) }
-        // 记忆管理：设置页改版时这块入口丢了（回调一直传着却没人用），
-        // 结果用户**没法删掉/屏蔽她记住的事**。这里接回来（不含日记，日记在上面单独看）。
-        val manageableMemories = state.memories.filter { it.kind != MemoryKind.DIARY }.take(50)
-        if (manageableMemories.isNotEmpty()) {
-            item {
-                Text("她记住的事", color = colors.text, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 10.dp))
-                Text("删掉就不会再提；屏蔽只是不再主动引用。", color = colors.textMuted, fontSize = AsterType.caption, modifier = Modifier.padding(top = 3.dp, bottom = 10.dp))
-            }
-            items(manageableMemories, key = { it.id }) { memory ->
-                Column(
-                    Modifier.fillMaxWidth().padding(bottom = 8.dp).asterCard(colors).padding(AsterMetrics.cardPadding)
-                ) {
-                    Text(memory.content.take(120), color = colors.text, fontSize = AsterType.body, lineHeight = 19.sp)
-                    Row(
-                        Modifier.fillMaxWidth().padding(top = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            memory.kind.name.lowercase(),
-                            color = colors.textMuted,
-                            fontSize = AsterType.micro,
-                            modifier = Modifier.weight(1f)
-                        )
-                        TextButton(onClick = { onToggleMemoryBlocked(memory.id, !memory.blockedFromMention) }) {
-                            Text(
-                                if (memory.blockedFromMention) "取消屏蔽" else "屏蔽",
-                                color = colors.textSubtle,
-                                fontSize = AsterType.label
-                            )
-                        }
-                        TextButton(onClick = { onDeleteMemory(memory.id) }) {
-                            Text("删除", color = MaterialTheme.colorScheme.error, fontSize = AsterType.label)
-                        }
-                    }
-                }
-            }
-            item { Spacer(Modifier.height(18.dp)) }
-        }
-    }
-    previewImageUri?.let { imageUri -> ImagePreviewDialog(imageUri) { previewImageUri = null } }
-}
 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
-private fun DiaryFilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
+internal fun DiaryFilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
     val colors = AsterTheme.colors
     Text(
         label,
@@ -1885,10 +1726,10 @@ internal fun relativeTimeLabel(timestamp: Long): String {
     }
 }
 
-private fun diaryDateKey(timestamp: Long): String =
+internal fun diaryDateKey(timestamp: Long): String =
     SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date(timestamp))
 
-private fun diaryDateLabel(timestamp: Long): String {
+internal fun diaryDateLabel(timestamp: Long): String {
     val formatter = SimpleDateFormat("yyyyMMdd", Locale.getDefault())
     val today = formatter.format(Date())
     val target = formatter.format(Date(timestamp))
